@@ -122,6 +122,7 @@ def slots_to_vertical_mini_table(slots, cell_w=6, use_outer_border=False):
 
 try:
     import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 except ImportError:
     print("Install openpyxl: pip install openpyxl", file=sys.stderr)
     sys.exit(1)
@@ -223,35 +224,108 @@ def main():
             w_date = max(w_date, len(date_str))
         rows_data.append((row_num, date_str, fr_str, to_str, slots))
 
-    col_row = "Row"
-    col_date = "Date"
-    col_from = "From"
-    col_to = "To"
-    col_slots = "Slots"
-    w_row = max(len(col_row), 4)
-    w_date = max(len(col_date), w_date)
-    w_from = max(len(col_from), 6)
-    w_to = max(len(col_to), 6)
-    w_slots_col = max(len(col_slots), w_slots_col)
-
     print(f"Reading: {path.name}\n")
+    print(f"Found {len(rows_data)} entries\n")
 
-    # Table: Row | Date | From | To | Slots (vertical From|To mini table inside each row's Slots cell)
-    sep_main = f"+{'-' * (w_row + 2)}+{'-' * (w_date + 2)}+{'-' * (w_from + 2)}+{'-' * (w_to + 2)}+{'-' * (w_slots_col + 2)}+"
-    head = f"| {col_row:<{w_row}} | {col_date:<{w_date}} | {col_from:<{w_from}} | {col_to:<{w_to}} | {col_slots:<{w_slots_col}} |"
-    print(sep_main)
-    print(head)
-    print(sep_main)
+    # Create output workbook
+    output_wb = openpyxl.Workbook()
+    output_sheet = output_wb.active
+    output_sheet.title = "Back down and Non compliance"
 
-    for row_num, date_str, fr, to, slots in rows_data:
-        mini_lines = slots_to_vertical_mini_table(slots, slot_cell_w)
-        for line_idx, mt_line in enumerate(mini_lines):
-            slot_cell = mt_line.ljust(w_slots_col) if len(mt_line) <= w_slots_col else mt_line
-            if line_idx == 0:
-                print(f"| {row_num:<{w_row}} | {date_str:<{w_date}} | {fr:<{w_from}} | {to:<{w_to}} | {slot_cell} |")
-            else:
-                print(f"| {'':<{w_row}} | {'':<{w_date}} | {'':<{w_from}} | {'':<{w_to}} | {slot_cell} |")
-        print(sep_main)
+    # Define styles
+    title_font = Font(bold=True, size=14)
+    header_font = Font(bold=True, size=11)
+    center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # Row 1: Main title
+    output_sheet.merge_cells('A1:J1')
+    title_cell = output_sheet['A1']
+    title_cell.value = "Back down and Non compliance of HNPCL for Oct 2025"
+    title_cell.font = title_font
+    title_cell.alignment = center_align
+
+    # Row 2: Category headers
+    # "Back down" spans columns A-G (7 columns)
+    output_sheet.merge_cells('A2:G2')
+    backdown_header = output_sheet['A2']
+    backdown_header.value = "Back down"
+    backdown_header.font = header_font
+    backdown_header.alignment = center_align
+    backdown_header.border = thin_border
+
+    # "Non compliance" spans columns H-J (3 columns)
+    output_sheet.merge_cells('H2:J2')
+    noncompliance_header = output_sheet['H2']
+    noncompliance_header.value = "Non compliance"
+    noncompliance_header.font = header_font
+    noncompliance_header.alignment = center_align
+    noncompliance_header.border = thin_border
+
+    # Row 3: Column headers
+    headers_backdown = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus"]
+    headers_noncompliance = ["MW as per ramp", "Diff", "MU"]
+    
+    # Back down headers (columns A-G)
+    for col_idx, header in enumerate(headers_backdown, start=1):
+        cell = output_sheet.cell(row=3, column=col_idx)
+        cell.value = header
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+        # Yellow background for "As per SLDC Scada in MW"
+        if header == "As per SLDC Scada in MW":
+            cell.fill = yellow_fill
+
+    # Non compliance headers (columns H-J)
+    for col_idx, header in enumerate(headers_noncompliance, start=8):
+        cell = output_sheet.cell(row=3, column=col_idx)
+        cell.value = header
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    # Data rows starting from row 4
+    for row_idx, (row_num, date_str, fr_str, to_str, slots) in enumerate(rows_data, start=4):
+        # Back down columns
+        output_sheet.cell(row=row_idx, column=1).value = date_str  # Date
+        output_sheet.cell(row=row_idx, column=2).value = fr_str   # From
+        output_sheet.cell(row=row_idx, column=3).value = to_str   # To
+        # Columns 4-7 (DC (MW), As per SLDC Scada in MW, Diff (MW), Mus) left empty
+        # Columns 8-10 (MW as per ramp, Diff, MU) left empty
+        
+        # Apply borders to all cells in the row
+        for col in range(1, 11):
+            output_sheet.cell(row=row_idx, column=col).border = thin_border
+
+    # Adjust column widths
+    output_sheet.column_dimensions['A'].width = 12  # Date
+    output_sheet.column_dimensions['B'].width = 8   # From
+    output_sheet.column_dimensions['C'].width = 8   # To
+    output_sheet.column_dimensions['D'].width = 10  # DC (MW)
+    output_sheet.column_dimensions['E'].width = 25  # As per SLDC Scada in MW
+    output_sheet.column_dimensions['F'].width = 12  # Diff (MW)
+    output_sheet.column_dimensions['G'].width = 10  # Mus
+    output_sheet.column_dimensions['H'].width = 15  # MW as per ramp
+    output_sheet.column_dimensions['I'].width = 10  # Diff
+    output_sheet.column_dimensions['J'].width = 10  # MU
+
+    # Set row heights
+    output_sheet.row_dimensions[1].height = 25  # Title row
+    output_sheet.row_dimensions[2].height = 20  # Category headers
+    output_sheet.row_dimensions[3].height = 30  # Column headers (for wrapped text)
+
+    # Save output file
+    output_path = input_dir / "Back_down_and_Non_compliance_output.xlsx"
+    output_wb.save(output_path)
+    print(f"Output saved to: {output_path}")
+    print(f"Created {len(rows_data)} data rows")
 
     wb.close()
 
