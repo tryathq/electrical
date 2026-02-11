@@ -9,6 +9,7 @@ Read INSTRUCTION.xlsx and print from/to time and 15-minute slots for each entry.
   Day is divided as 00:00, 00:15, 00:30, 00:45, 01:00, ... 23:45.
 """
 
+import argparse
 import datetime
 import sys
 from pathlib import Path
@@ -164,13 +165,28 @@ def find_date_column(sheet, max_header_rows=4):
 
 
 def main():
-    base = Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser(
+        description="Read INSTRUCTION.xlsx and print from/to time and 15-minute slots for each entry."
+    )
+    parser.add_argument(
+        "directory",
+        help="Path to directory containing INSTRUCTION.xlsx"
+    )
+    args = parser.parse_args()
+
+    input_dir = Path(args.directory)
+    if not input_dir.is_dir():
+        print(f"Directory does not exist: {input_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Search for fixed filenames in the directory
     for name in ("INSTRUCTION.xlsx", "instructions.xlsx", "Instruction.xlsx"):
-        path = base / name
-        if path.exists():
+        candidate = input_dir / name
+        if candidate.exists():
+            path = candidate
             break
     else:
-        print("No INSTRUCTION.xlsx or instructions.xlsx found.", file=sys.stderr)
+        print(f"No INSTRUCTION.xlsx found in directory: {input_dir}", file=sys.stderr)
         sys.exit(1)
 
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
