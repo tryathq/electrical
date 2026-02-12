@@ -438,26 +438,26 @@ class SCADALookupCache:
             row_num = data_start
             try:
                 for row_tuple in ws.iter_rows(min_row=data_start, max_row=data_start + max_rows_to_read - 1, min_col=time_col, max_col=time_col, values_only=True):
-                if not row_tuple or row_tuple[0] is None:
-                    row_num += 1
-                    continue
+                    if not row_tuple or row_tuple[0] is None:
+                        row_num += 1
+                        continue
+                        
+                    time_cell_raw = row_tuple[0]
                     
-                time_cell_raw = row_tuple[0]
-                
-                # Extract time quickly - avoid format_value() for speed
-                time_norm = None
-                if isinstance(time_cell_raw, datetime):
-                    # Direct datetime - extract HH:MM directly (fastest path)
-                    time_norm = f"{time_cell_raw.hour:02d}:{time_cell_raw.minute:02d}"
-                else:
-                    time_str = str(time_cell_raw)
-                    # Extract time part (last part after space if present)
-                    if " " in time_str:
-                        time_part = time_str.split()[-1]
-                        time_norm = normalize_time_str(time_part)
+                    # Extract time quickly - avoid format_value() for speed
+                    time_norm = None
+                    if isinstance(time_cell_raw, datetime):
+                        # Direct datetime - extract HH:MM directly (fastest path)
+                        time_norm = f"{time_cell_raw.hour:02d}:{time_cell_raw.minute:02d}"
                     else:
-                        time_norm = normalize_time_str(time_str)
-                
+                        time_str = str(time_cell_raw)
+                        # Extract time part (last part after space if present)
+                        if " " in time_str:
+                            time_part = time_str.split()[-1]
+                            time_norm = normalize_time_str(time_part)
+                        else:
+                            time_norm = normalize_time_str(time_str)
+                    
                     if time_norm:
                         time_map[time_norm] = row_num
                     
@@ -985,9 +985,10 @@ def main():
     output_sheet['C1'] = 'To'
     output_sheet['D1'] = 'DC (MW)'
     output_sheet['E1'] = 'As per SLDC Scada in MW'
+    output_sheet['F1'] = 'Diff (MW)'
     
     # Apply header styles
-    for col in ['A1', 'B1', 'C1', 'D1', 'E1']:
+    for col in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1']:
         cell = output_sheet[col]
         cell.font = header_font
         cell.alignment = center_align
@@ -1087,8 +1088,21 @@ def main():
                         
                         output_sheet.cell(row=row_idx, column=5).value = scada_value if scada_value is not None else ""
                         
+                        # Calculate difference: DC - SCADA
+                        diff_value = None
+                        if dc_value is not None and scada_value is not None:
+                            try:
+                                dc_num = float(dc_value) if isinstance(dc_value, (int, float, str)) and str(dc_value).strip() else None
+                                scada_num = float(scada_value) if isinstance(scada_value, (int, float, str)) and str(scada_value).strip() else None
+                                if dc_num is not None and scada_num is not None:
+                                    diff_value = dc_num - scada_num
+                            except (ValueError, TypeError):
+                                pass  # Keep as None if conversion fails
+                        
+                        output_sheet.cell(row=row_idx, column=6).value = diff_value if diff_value is not None else ""
+                        
                         # Apply borders
-                        for col in range(1, 6):
+                        for col in range(1, 7):
                             output_sheet.cell(row=row_idx, column=col).border = thin_border
                         
                         row_idx += 1
@@ -1099,6 +1113,7 @@ def main():
     output_sheet.column_dimensions['C'].width = 10  # To
     output_sheet.column_dimensions['D'].width = 12  # DC (MW)
     output_sheet.column_dimensions['E'].width = 25  # As per SLDC Scada in MW
+    output_sheet.column_dimensions['F'].width = 12  # Diff (MW)
     
     # Generate output filename with station name and timestamp (human-readable format with AM/PM)
     # Best practice: Use dashes for all separators (safe on all OS, readable)
