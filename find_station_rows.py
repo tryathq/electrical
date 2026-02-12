@@ -457,16 +457,11 @@ class SCADALookupCache:
             cache_entry = (wb, ws, time_col, target_col, header_row, time_map)
             self.cache[date_str] = cache_entry
             
-            if show_progress and len(time_map) == 0:
-                print(f" (⚠ warning: time map empty)", end="", flush=True)
-            elif show_progress:
-                print(f" (✓ {len(time_map)} time slots mapped)", end="", flush=True)
-            
             return cache_entry
             
         except Exception as e:
             if show_progress:
-                print(f" (✗ error: {str(e)[:50]})", end="", flush=True)
+                print(f" (error)", end="", flush=True)
             return None
     
     def find_value(self, date_str, time_str, debug=False, show_progress=False):
@@ -480,68 +475,40 @@ class SCADALookupCache:
         # Normalize time for lookup
         time_norm = normalize_time_str(time_str)
         
-        if debug:
-            print(f"\n    [DEBUG SCADA] Date: {date_str}, Time: '{time_str}' -> '{time_norm}'", file=sys.stderr)
-            print(f"    [DEBUG SCADA] Time map size: {len(time_map)}", file=sys.stderr)
-            if len(time_map) > 0:
-                sample_times = list(time_map.keys())[:10]
-                print(f"    [DEBUG SCADA] Sample times in map: {sample_times}", file=sys.stderr)
-            print(f"    [DEBUG SCADA] Columns: Time={time_col}, Target={target_col}, HeaderRow={header_row}", file=sys.stderr)
-        
         # Look up row number from cache
         row_num = time_map.get(time_norm)
         if row_num:
             target_cell = ws.cell(row=row_num, column=target_col)
-            value = target_cell.value
-            if debug:
-                print(f"    [DEBUG SCADA] ✓ Found in map: row {row_num}, value = {value}", file=sys.stderr)
-            return value
-        
-        if debug:
-            print(f"    [DEBUG SCADA] ✗ Not in map, searching manually...", file=sys.stderr)
+            return target_cell.value
         
         # Fallback: search if not in cache (limit search range)
         data_start = header_row + 1
-        max_search = min(ws.max_row + 1, data_start + 200)  # Increased range
-        matches_checked = 0
+        max_search = min(ws.max_row + 1, data_start + 200)
         for row_num in range(data_start, max_search):
             time_cell = ws.cell(row=row_num, column=time_col)
             if time_cell.value is None:
                 continue
             
-            matches_checked += 1
             time_cell_raw = time_cell.value
-            time_cell_val = format_value(time_cell_raw)
-            
-            if debug and matches_checked <= 5:
-                print(f"    [DEBUG SCADA] Row {row_num}: raw='{time_cell_raw}', formatted='{time_cell_val}'", file=sys.stderr)
             
             # Extract time part if it's a datetime string
             time_cell_norm = None
             if isinstance(time_cell_raw, datetime):
-                # Direct datetime object - extract time part
                 time_cell_norm = normalize_time_str(time_cell_raw.strftime("%H:%M:%S"))
-            elif " " in str(time_cell_val):
-                parts = str(time_cell_val).split()
-                if len(parts) > 1:
-                    time_part = parts[-1]
-                    time_cell_norm = normalize_time_str(time_part)
             else:
-                time_cell_norm = normalize_time_str(time_cell_val)
+                time_cell_val = format_value(time_cell_raw)
+                if " " in str(time_cell_val):
+                    parts = str(time_cell_val).split()
+                    if len(parts) > 1:
+                        time_part = parts[-1]
+                        time_cell_norm = normalize_time_str(time_part)
+                else:
+                    time_cell_norm = normalize_time_str(time_cell_val)
             
-            if debug and matches_checked <= 5:
-                print(f"    [DEBUG SCADA]   normalized='{time_cell_norm}', match={time_cell_norm == time_norm}", file=sys.stderr)
-            
-            # Match normalized times or check if time_norm is contained in cell value
+            # Match normalized times
             if time_cell_norm == time_norm or time_norm in str(time_cell_val) or time_norm in str(time_cell_raw):
                 target_cell = ws.cell(row=row_num, column=target_col)
-                value = target_cell.value
-                if debug:
-                    print(f"    [DEBUG SCADA] ✓ Found manually: row {row_num}, value = {value}", file=sys.stderr)
-                return value
-        
-        if debug:
-            print(f"    [DEBUG SCADA] ✗ No match found after checking {matches_checked} rows", file=sys.stderr)
+                return target_cell.value
         
         return None
     
@@ -863,21 +830,19 @@ def main():
                     bd_folder = None
         
         if bd_folder and bd_folder.exists() and bd_folder.is_dir():
-            print(f"BD folder: {bd_folder}")
+            pass  # BD folder found, continue
         elif bd_folder:
-            print(f"Warning: BD folder is not a directory: {bd_folder}", file=sys.stderr)
             bd_folder = None
     elif args.scada_column:
         # If scada-column is provided but no bd-folder, try default
         default_bd = Path("data/BD")
         if default_bd.exists() and default_bd.is_dir():
             bd_folder = default_bd
-            print(f"BD folder (default): {bd_folder}")
         else:
-            print(f"Warning: Default BD folder not found: {default_bd}", file=sys.stderr)
+            bd_folder = None
     
     if args.scada_column and not bd_folder:
-        print("Warning: SCADA column specified but BD folder not found. SCADA values will not be filled.", file=sys.stderr)
+        print("Warning: BD folder not found. SCADA values will not be filled.", file=sys.stderr)
     
     # Load DC workbook if provided
     dc_wb = None
@@ -914,18 +879,9 @@ def main():
         if dc_path_resolved and dc_path_resolved.is_file():
             try:
                 dc_wb = openpyxl.load_workbook(dc_path_resolved, read_only=True, data_only=True)
-                print(f"DC file loaded: {dc_path_resolved.name} ({len(dc_wb.sheetnames)} sheets)")
             except Exception as e:
-                print(f"Error loading DC file '{dc_path_resolved}': {e}", file=sys.stderr)
+                print(f"Error loading DC file: {e}", file=sys.stderr)
                 print("Continuing without DC values...", file=sys.stderr)
-        else:
-            print(f"Warning: DC file not found: {args.dc_file}", file=sys.stderr)
-            print(f"  Searched in:", file=sys.stderr)
-            for path_attempt in paths_to_try:
-                exists = "✓" if path_attempt.exists() else "✗"
-                print(f"    {exists} {path_attempt}", file=sys.stderr)
-            
-            print("Continuing without DC values...", file=sys.stderr)
     
     # Load workbook
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=args.data_only)
@@ -948,12 +904,6 @@ def main():
     else:
         ws = wb.active
     
-    print(f"File: {xlsx_path.name}")
-    print(f"Sheet: {ws.title}")
-    print(f"Searching for station: '{args.station_name}'")
-    print(f"Column to search: '{args.column}'")
-    print()
-    
     # Find column
     col_idx, header_row = find_column_by_name(ws, args.column, max_header_rows=args.header_rows)
     if col_idx is None:
@@ -964,10 +914,6 @@ def main():
         print(f"  {first_row}", file=sys.stderr)
         wb.close()
         sys.exit(1)
-    
-    col_letter = openpyxl.utils.get_column_letter(col_idx)
-    print(f"Found column '{args.column}' at column {col_letter} (index {col_idx}), header row {header_row}")
-    print()
     
     # Find matching rows
     matches = find_matching_rows(ws, col_idx, args.station_name, header_row)
@@ -988,103 +934,15 @@ def main():
             elif "date" in header_val:
                 date_col = col_idx_header
     
-    if args.verbose:
-        if date_col:
-            print(f"Found 'Date' column at column {openpyxl.utils.get_column_letter(date_col)}")
-        if from_time_col:
-            print(f"Found 'From Time' column at column {openpyxl.utils.get_column_letter(from_time_col)}")
-        if to_time_col:
-            print(f"Found 'To Time' column at column {openpyxl.utils.get_column_letter(to_time_col)}")
-    
-    if not date_col and args.dc_file:
-        print("Warning: Date column not found. DC lookup will not work.", file=sys.stderr)
+    if not date_col and (args.dc_file or args.scada_column):
+        print("Warning: Date column not found.", file=sys.stderr)
     if not from_time_col or not to_time_col:
-        print("Warning: From/To Time columns not found. Time slots will not be generated.", file=sys.stderr)
+        print("Warning: From/To Time columns not found.", file=sys.stderr)
     
     if not matches:
         print(f"No rows found where '{args.column}' = '{args.station_name}'")
         wb.close()
         sys.exit(0)
-    
-    print(f"Found {len(matches)} matching row(s):")
-    print("=" * 100)
-    
-    # Get header row for display
-    headers = []
-    for col_idx_header in range(1, min(ws.max_column + 1, args.max_columns + 1)):
-        header_cell = ws.cell(row=header_row, column=col_idx_header)
-        headers.append(str(header_cell.value)[:25] if header_cell.value else f"Col{col_idx_header}")
-    
-    # Print header
-    print(" | ".join(f"{h:<25}" for h in headers))
-    print("-" * 100)
-    
-    # Print matching rows (without row numbers) and extract 15-minute ranges
-    prev_entry = None
-    for idx, (row_num, row_data) in enumerate(matches, 1):
-        row_display = [format_value(v)[:25] for v in row_data[:args.max_columns]]
-        print(" | ".join(f"{val:<25}" for val in row_display))
-        if len(row_data) > args.max_columns:
-            print(f"... ({len(row_data)} columns total, showing first {args.max_columns})")
-        
-        # Extract and display 15-minute intervals if time columns exist
-        if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
-            from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
-            to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
-            date_val = row_data[date_col - 1] if date_col and date_col > 0 and date_col <= len(row_data) else None
-            
-            if from_time_val is not None and to_time_val is not None:
-                slots = slots_15min(from_time_val, to_time_val)
-                if slots:
-                    date_str = format_value(date_val) if date_val else ""
-                    fr_str = format_value(from_time_val)
-                    to_str = format_value(to_time_val)
-                    
-                    print(f"\n  Row {idx} - 15-minute intervals ({len(slots)} slots):")
-                    if date_str:
-                        print(f"    Date: {date_str}")
-                    print(f"    From: {fr_str} | To: {to_str}")
-                    
-                    # Calculate gap from previous entry
-                    if prev_entry:
-                        prev_date_str, prev_to_str, prev_to_min = prev_entry
-                        curr_from_min = parse_time_str(fr_str)
-                        
-                        if curr_from_min is not None and prev_to_min is not None:
-                            if date_str == prev_date_str:
-                                gap_minutes = curr_from_min - prev_to_min
-                                if gap_minutes < 0:
-                                    gap_minutes += 24 * 60
-                            else:
-                                if prev_to_min == 0 and curr_from_min == 0:
-                                    gap_minutes = 0
-                                else:
-                                    gap_to_midnight = (24 * 60) - prev_to_min if prev_to_min > 0 else 0
-                                    gap_from_midnight = curr_from_min
-                                    gap_minutes = gap_to_midnight + gap_from_midnight
-                            
-                            gap_slots = gap_minutes // 15
-                            if gap_slots > 0:
-                                print(f"    [Gap: {gap_slots} x 15-min slots ({gap_minutes} minutes) from {prev_to_str} to {fr_str}]")
-                            elif gap_slots == 0:
-                                print(f"    [No gap: continuous from {prev_to_str} to {fr_str}]")
-                    
-                    # Show first few and last few slots if many
-                    if len(slots) <= 10:
-                        for slot_from, slot_to in slots:
-                            print(f"      {slot_from} - {slot_to}")
-                    else:
-                        for slot_from, slot_to in slots[:3]:
-                            print(f"      {slot_from} - {slot_to}")
-                        print(f"      ... ({len(slots) - 6} more slots) ...")
-                        for slot_from, slot_to in slots[-3:]:
-                            print(f"      {slot_from} - {slot_to}")
-                    
-                    # Store for next iteration
-                    to_min = parse_time_str(to_str)
-                    if to_min is not None:
-                        prev_entry = (date_str, to_str, to_min)
-                    print()
     
     # Create output Excel file
     output_wb = openpyxl.Workbook()
@@ -1119,9 +977,6 @@ def main():
     scada_cache = None
     if bd_folder and args.scada_column:
         scada_cache = SCADALookupCache(bd_folder, args.scada_column, args.bd_sheet)
-        file_count = len(scada_cache.file_list)
-        sheet_info = f" (sheet: {args.bd_sheet})" if args.bd_sheet else " (active sheet)"
-        print(f"SCADA lookup ready for column: {args.scada_column}{sheet_info} ({file_count} BD files found, will load on demand)")
     
     # Populate data rows
     row_idx = 2
@@ -1144,11 +999,8 @@ def main():
                 slots = slots_15min(from_time_val, to_time_val)
                 total_slots += len(slots) if slots else 0
     
-    print(f"\nProcessing {len(matches)} time range(s) with {total_slots} total time slots...")
     if scada_cache:
-        print("Starting SCADA lookups...")
-        print("  Format: [Slot#] Date       | From  - To    | DC (MW)  | SCADA (MW)")
-        print("  " + "-" * 70)
+        print(f"\nProcessing {len(matches)} time range(s) with {total_slots} total time slots...")
     
     for idx, (row_num, row_data) in enumerate(matches, 1):
         if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
@@ -1200,26 +1052,18 @@ def main():
                         if scada_cache and date_str:
                             # Show progress only for first slot of each date (when loading file)
                             show_progress_now = (slot_idx == 0)
-                            # Enable debug for first few lookups and when values are not found
-                            debug_scada = (args.verbose or (processed_slots < 5) or (scada_not_found_count < 3)) and slot_idx == 0
-                            scada_value = find_scada_value(scada_cache, date_str, slot_from, debug=debug_scada, show_progress=show_progress_now)
-                            
-                            # If not found and it's the first slot, show warning
-                            if scada_value is None and slot_idx == 0 and processed_slots == 0:
-                                print(f"    ⚠ Warning: No SCADA value found for {date_str} {slot_from}. Use --verbose for details.", file=sys.stderr)
+                            scada_value = find_scada_value(scada_cache, date_str, slot_from, debug=args.verbose, show_progress=show_progress_now)
                             if scada_value is not None:
                                 scada_found_count += 1
                             else:
                                 scada_not_found_count += 1
                             
-                            # Increment counter
+                            # Increment counter and show progress
                             processed_slots += 1
-                            
-                            # Show row with SCADA value
-                            date_display = date_str if slot_idx == 0 else ""  # Show date only for first slot
-                            scada_display = f"{scada_value:.2f}" if scada_value is not None else "---"
-                            dc_display = f"{dc_value:.2f}" if dc_value is not None else "---"
-                            print(f"    [{processed_slots:4d}/{total_slots}] {date_display:12s} | {slot_from:5s} - {slot_to:5s} | DC: {dc_display:8s} | SCADA: {scada_display:8s}", flush=True)
+                            if slot_idx == len(slots) - 1:  # Last slot of this range
+                                print(f" ({processed_slots}/{total_slots} slots)", flush=True)
+                            elif processed_slots % 50 == 0:
+                                print(".", end="", flush=True)
                         
                         output_sheet.cell(row=row_idx, column=5).value = scada_value if scada_value is not None else ""
                         
@@ -1258,19 +1102,16 @@ def main():
     output_wb.save(output_path)
     print(f"\nOutput file created: {output_path}")
     
+    # Show summary only if there were issues
     if dc_wb:
         total_dc_lookups = dc_found_count + dc_not_found_count
-        if total_dc_lookups > 0:
-            print(f"\nDC Lookup Summary: {dc_found_count} found, {dc_not_found_count} not found (out of {total_dc_lookups} lookups)")
-            if dc_not_found_count > 0 and dc_found_count == 0:
-                print(f"  Warning: No DC values were found. Use --verbose for detailed debugging.")
+        if total_dc_lookups > 0 and dc_found_count == 0:
+            print(f"\nWarning: No DC values found ({dc_not_found_count} lookups). Use --verbose for details.", file=sys.stderr)
     
     if bd_folder and args.scada_column:
         total_scada_lookups = scada_found_count + scada_not_found_count
-        if total_scada_lookups > 0:
-            print(f"\nSCADA Lookup Summary: {scada_found_count} found, {scada_not_found_count} not found (out of {total_scada_lookups} lookups)")
-            if scada_not_found_count > 0 and scada_found_count == 0:
-                print(f"  Warning: No SCADA values were found. Use --verbose for detailed debugging.")
+        if total_scada_lookups > 0 and scada_found_count == 0:
+            print(f"\nWarning: No SCADA values found ({scada_not_found_count} lookups). Use --verbose for details.", file=sys.stderr)
     
     # Close all workbooks and caches
     wb.close()
