@@ -17,6 +17,7 @@ from datetime import datetime, date, time
 
 try:
     import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side
 except ImportError:
     print("Install openpyxl: pip install openpyxl", file=sys.stderr)
     sys.exit(1)
@@ -275,104 +276,179 @@ def main():
     # Find matching rows
     matches = find_matching_rows(ws, col_idx, args.station_name, header_row)
     
+    # Try to find "From Time" and "To Time" columns for 15-minute extraction
+    from_time_col = None
+    to_time_col = None
+    date_col = None
+    
+    for col_idx_header in range(1, ws.max_column + 1):
+        header_cell = ws.cell(row=header_row, column=col_idx_header)
+        if header_cell.value:
+            header_val = str(header_cell.value).strip().lower()
+            if "from" in header_val and "time" in header_val:
+                from_time_col = col_idx_header
+            elif "to" in header_val and "time" in header_val:
+                to_time_col = col_idx_header
+            elif "date" in header_val:
+                date_col = col_idx_header
+    
     if not matches:
         print(f"No rows found where '{args.column}' = '{args.station_name}'")
-    else:
-        print(f"Found {len(matches)} matching row(s):")
-        print("=" * 100)
+        wb.close()
+        sys.exit(0)
+    
+    print(f"Found {len(matches)} matching row(s):")
+    print("=" * 100)
+    
+    # Get header row for display
+    headers = []
+    for col_idx_header in range(1, min(ws.max_column + 1, args.max_columns + 1)):
+        header_cell = ws.cell(row=header_row, column=col_idx_header)
+        headers.append(str(header_cell.value)[:25] if header_cell.value else f"Col{col_idx_header}")
+    
+    # Print header
+    print(" | ".join(f"{h:<25}" for h in headers))
+    print("-" * 100)
+    
+    # Print matching rows (without row numbers) and extract 15-minute ranges
+    prev_entry = None
+    for idx, (row_num, row_data) in enumerate(matches, 1):
+        row_display = [format_value(v)[:25] for v in row_data[:args.max_columns]]
+        print(" | ".join(f"{val:<25}" for val in row_display))
+        if len(row_data) > args.max_columns:
+            print(f"... ({len(row_data)} columns total, showing first {args.max_columns})")
         
-        # Try to find "From Time" and "To Time" columns for 15-minute extraction
-        from_time_col = None
-        to_time_col = None
-        date_col = None
-        
-        for col_idx_header in range(1, ws.max_column + 1):
-            header_cell = ws.cell(row=header_row, column=col_idx_header)
-            if header_cell.value:
-                header_val = str(header_cell.value).strip().lower()
-                if "from" in header_val and "time" in header_val:
-                    from_time_col = col_idx_header
-                elif "to" in header_val and "time" in header_val:
-                    to_time_col = col_idx_header
-                elif "date" in header_val:
-                    date_col = col_idx_header
-        
-        # Get header row for display
-        headers = []
-        for col_idx_header in range(1, min(ws.max_column + 1, args.max_columns + 1)):
-            header_cell = ws.cell(row=header_row, column=col_idx_header)
-            headers.append(str(header_cell.value)[:25] if header_cell.value else f"Col{col_idx_header}")
-        
-        # Print header
-        print(" | ".join(f"{h:<25}" for h in headers))
-        print("-" * 100)
-        
-        # Print matching rows (without row numbers) and extract 15-minute ranges
-        prev_entry = None
-        for idx, (row_num, row_data) in enumerate(matches, 1):
-            row_display = [format_value(v)[:25] for v in row_data[:args.max_columns]]
-            print(" | ".join(f"{val:<25}" for val in row_display))
-            if len(row_data) > args.max_columns:
-                print(f"... ({len(row_data)} columns total, showing first {args.max_columns})")
+        # Extract and display 15-minute intervals if time columns exist
+        if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
+            from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
+            to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
+            date_val = row_data[date_col - 1] if date_col and date_col > 0 and date_col <= len(row_data) else None
             
-            # Extract and display 15-minute intervals if time columns exist
-            if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
-                from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
-                to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
-                date_val = row_data[date_col - 1] if date_col and date_col > 0 and date_col <= len(row_data) else None
-                
-                if from_time_val is not None and to_time_val is not None:
-                    slots = slots_15min(from_time_val, to_time_val)
-                    if slots:
-                        date_str = format_value(date_val) if date_val else ""
-                        fr_str = format_value(from_time_val)
-                        to_str = format_value(to_time_val)
+            if from_time_val is not None and to_time_val is not None:
+                slots = slots_15min(from_time_val, to_time_val)
+                if slots:
+                    date_str = format_value(date_val) if date_val else ""
+                    fr_str = format_value(from_time_val)
+                    to_str = format_value(to_time_val)
+                    
+                    print(f"\n  Row {idx} - 15-minute intervals ({len(slots)} slots):")
+                    if date_str:
+                        print(f"    Date: {date_str}")
+                    print(f"    From: {fr_str} | To: {to_str}")
+                    
+                    # Calculate gap from previous entry
+                    if prev_entry:
+                        prev_date_str, prev_to_str, prev_to_min = prev_entry
+                        curr_from_min = parse_time_str(fr_str)
                         
-                        print(f"\n  Row {idx} - 15-minute intervals ({len(slots)} slots):")
-                        if date_str:
-                            print(f"    Date: {date_str}")
-                        print(f"    From: {fr_str} | To: {to_str}")
-                        
-                        # Calculate gap from previous entry
-                        if prev_entry:
-                            prev_date_str, prev_to_str, prev_to_min = prev_entry
-                            curr_from_min = parse_time_str(fr_str)
-                            
-                            if curr_from_min is not None and prev_to_min is not None:
-                                if date_str == prev_date_str:
-                                    gap_minutes = curr_from_min - prev_to_min
-                                    if gap_minutes < 0:
-                                        gap_minutes += 24 * 60
+                        if curr_from_min is not None and prev_to_min is not None:
+                            if date_str == prev_date_str:
+                                gap_minutes = curr_from_min - prev_to_min
+                                if gap_minutes < 0:
+                                    gap_minutes += 24 * 60
+                            else:
+                                if prev_to_min == 0 and curr_from_min == 0:
+                                    gap_minutes = 0
                                 else:
-                                    if prev_to_min == 0 and curr_from_min == 0:
-                                        gap_minutes = 0
-                                    else:
-                                        gap_to_midnight = (24 * 60) - prev_to_min if prev_to_min > 0 else 0
-                                        gap_from_midnight = curr_from_min
-                                        gap_minutes = gap_to_midnight + gap_from_midnight
-                                
-                                gap_slots = gap_minutes // 15
-                                if gap_slots > 0:
-                                    print(f"    [Gap: {gap_slots} x 15-min slots ({gap_minutes} minutes) from {prev_to_str} to {fr_str}]")
-                                elif gap_slots == 0:
-                                    print(f"    [No gap: continuous from {prev_to_str} to {fr_str}]")
-                        
-                        # Show first few and last few slots if many
-                        if len(slots) <= 10:
-                            for slot_from, slot_to in slots:
-                                print(f"      {slot_from} - {slot_to}")
+                                    gap_to_midnight = (24 * 60) - prev_to_min if prev_to_min > 0 else 0
+                                    gap_from_midnight = curr_from_min
+                                    gap_minutes = gap_to_midnight + gap_from_midnight
+                            
+                            gap_slots = gap_minutes // 15
+                            if gap_slots > 0:
+                                print(f"    [Gap: {gap_slots} x 15-min slots ({gap_minutes} minutes) from {prev_to_str} to {fr_str}]")
+                            elif gap_slots == 0:
+                                print(f"    [No gap: continuous from {prev_to_str} to {fr_str}]")
+                    
+                    # Show first few and last few slots if many
+                    if len(slots) <= 10:
+                        for slot_from, slot_to in slots:
+                            print(f"      {slot_from} - {slot_to}")
+                    else:
+                        for slot_from, slot_to in slots[:3]:
+                            print(f"      {slot_from} - {slot_to}")
+                        print(f"      ... ({len(slots) - 6} more slots) ...")
+                        for slot_from, slot_to in slots[-3:]:
+                            print(f"      {slot_from} - {slot_to}")
+                    
+                    # Store for next iteration
+                    to_min = parse_time_str(to_str)
+                    if to_min is not None:
+                        prev_entry = (date_str, to_str, to_min)
+                    print()
+    
+    # Create output Excel file
+    output_wb = openpyxl.Workbook()
+    output_sheet = output_wb.active
+    output_sheet.title = "Time Intervals"
+    
+    # Define styles
+    header_font = Font(bold=True, size=11)
+    center_align = Alignment(horizontal='center', vertical='center')
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    # Headers
+    output_sheet['A1'] = 'Date'
+    output_sheet['B1'] = 'From'
+    output_sheet['C1'] = 'To'
+    
+    # Apply header styles
+    for col in ['A1', 'B1', 'C1']:
+        cell = output_sheet[col]
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+    
+    # Populate data rows
+    row_idx = 2
+    prev_date = None
+    
+    for idx, (row_num, row_data) in enumerate(matches, 1):
+        if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
+            from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
+            to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
+            date_val = row_data[date_col - 1] if date_col and date_col > 0 and date_col <= len(row_data) else None
+            
+            if from_time_val is not None and to_time_val is not None:
+                slots = slots_15min(from_time_val, to_time_val)
+                if slots:
+                    date_str = format_value(date_val) if date_val else ""
+                    
+                    for slot_from, slot_to in slots:
+                        # Only write date in first row of each date group
+                        if date_str and date_str != prev_date:
+                            output_sheet.cell(row=row_idx, column=1).value = date_str
+                            prev_date = date_str
                         else:
-                            for slot_from, slot_to in slots[:3]:
-                                print(f"      {slot_from} - {slot_to}")
-                            print(f"      ... ({len(slots) - 6} more slots) ...")
-                            for slot_from, slot_to in slots[-3:]:
-                                print(f"      {slot_from} - {slot_to}")
+                            output_sheet.cell(row=row_idx, column=1).value = ""  # Empty for same date
                         
-                        # Store for next iteration
-                        to_min = parse_time_str(to_str)
-                        if to_min is not None:
-                            prev_entry = (date_str, to_str, to_min)
-                        print()
+                        output_sheet.cell(row=row_idx, column=2).value = slot_from
+                        output_sheet.cell(row=row_idx, column=3).value = slot_to
+                        
+                        # Apply borders
+                        for col in range(1, 4):
+                            output_sheet.cell(row=row_idx, column=col).border = thin_border
+                        
+                        row_idx += 1
+    
+    # Adjust column widths
+    output_sheet.column_dimensions['A'].width = 15  # Date
+    output_sheet.column_dimensions['B'].width = 10  # From
+    output_sheet.column_dimensions['C'].width = 10  # To
+    
+    # Generate output filename with station name and timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    station_safe = args.station_name.replace(" ", "_").replace("/", "_")
+    output_filename = f"{station_safe}_{timestamp}.xlsx"
+    output_path = xlsx_path.parent / output_filename
+    
+    output_wb.save(output_path)
+    print(f"\nOutput file created: {output_path}")
     
     wb.close()
 
