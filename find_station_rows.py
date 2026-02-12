@@ -808,7 +808,12 @@ def main():
     timestamp = f"{date_part}_{time_part}"
     station_safe = args.station_name.replace(" ", "_").replace("/", "_")
     output_filename = f"{station_safe}_{timestamp}.xlsx"
-    output_path = xlsx_path.parent / output_filename
+    
+    # Create output directory if it doesn't exist
+    output_dir = xlsx_path.parent / "output"
+    output_dir.mkdir(exist_ok=True)
+    
+    output_path = output_dir / output_filename
     
     output_wb.save(output_path)
     print(f"\nOutput file created: {output_path}")
