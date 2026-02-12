@@ -13,6 +13,7 @@ Example:
 
 import argparse
 import sys
+import re
 from pathlib import Path
 from datetime import datetime, date, time
 
@@ -169,6 +170,402 @@ def normalize_time_str(time_str):
     if minutes is not None:
         return minutes_to_time_str(minutes)
     return time_str
+
+
+def convert_date_for_bd_filename(date_str):
+    """
+    Convert date string from format '01-Jan-2026' to various formats for BD filename matching.
+    Returns list of possible date strings to search for in filenames.
+    """
+    if not date_str:
+        return []
+    
+    date_str = str(date_str).strip()
+    date_formats = [
+        "%d-%b-%Y",      # 01-Jan-2026
+        "%d-%b-%y",      # 01-Jan-26
+        "%d.%m.%Y",      # 01.01.2026
+        "%d/%m/%Y",      # 01/01/2026
+        "%Y-%m-%d",      # 2026-01-01
+    ]
+    
+    possible_dates = []
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            # Generate various formats for filename matching
+            day_no_zero = str(dt.day)  # Day without leading zero
+            month_no_zero = str(dt.month)  # Month without leading zero
+            possible_dates.extend([
+                dt.strftime("%d/%m/%Y"),      # 01/01/2026
+                f"{day_no_zero}/{month_no_zero}/{dt.year}",  # 1/1/2026 (no leading zeros)
+                dt.strftime("%d-%m-%Y"),      # 01-01-2026
+                f"{day_no_zero}-{month_no_zero}-{dt.year}",  # 1-1-2026
+                dt.strftime("%Y-%m-%d"),      # 2026-01-01
+                dt.strftime("%Y/%m/%d"),      # 2026/01/01
+            ])
+        except ValueError:
+            continue
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_dates = []
+    for date in possible_dates:
+        if date not in seen:
+            seen.add(date)
+            unique_dates.append(date)
+    
+    return unique_dates
+
+
+def find_bd_file(bd_folder, date_str):
+    """
+    Find BD file in folder that contains the given date in its filename.
+    Returns Path to file or None if not found.
+    """
+    if not bd_folder or not bd_folder.exists() or not bd_folder.is_dir():
+        return None
+    
+    if not date_str:
+        return None
+    
+    # Get possible date formats for filename matching
+    possible_dates = convert_date_for_bd_filename(date_str)
+    
+    # Search for files containing any of the date formats
+    for file_path in bd_folder.glob("*.xlsx"):
+        filename_lower = file_path.name.lower()
+        for date_format in possible_dates:
+            if date_format.lower() in filename_lower:
+                return file_path
+    
+    # Also try .xls files
+    for file_path in bd_folder.glob("*.xls"):
+        filename_lower = file_path.name.lower()
+        for date_format in possible_dates:
+            if date_format.lower() in filename_lower:
+                return file_path
+    
+    return None
+
+
+class SCADALookupCache:
+    """Cache for BD file lookups - maintains file list and loads files on demand."""
+    def __init__(self, bd_folder, column_name, sheet_name=None):
+        self.bd_folder = bd_folder
+        self.column_name = column_name
+        self.sheet_name = sheet_name  # Specific sheet to read (e.g., "DATA-CMD")
+        self.cache = {}  # {date_str: (wb, ws, time_col, target_col, header_row, time_map)}
+        self.file_list = []  # List of (file_path, possible_dates) tuples
+        self.column_cache = {}  # {file_path: (time_col, target_col, header_row)}
+        
+        # Build file list at initialization (just paths, no opening)
+        self._build_file_list()
+    
+    def _build_file_list(self):
+        """Build list of BD files with their possible date matches (no file opening)."""
+        if not self.bd_folder or not self.bd_folder.exists():
+            return
+        
+        # Get all Excel files in BD folder
+        excel_files = list(self.bd_folder.glob("*.xlsx")) + list(self.bd_folder.glob("*.xls"))
+        
+        for file_path in excel_files:
+            filename_lower = file_path.name.lower()
+            # Extract possible dates from filename
+            possible_dates = []
+            
+            # Try to extract dates from filename (common patterns)
+            # Pattern for dates like 1/1/2026, 01/01/2026, 2026-01-01, etc.
+            date_patterns = [
+                r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})',  # 1/1/2026 or 01-01-2026
+                r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # 2026-01-01
+            ]
+            
+            for pattern in date_patterns:
+                matches = re.findall(pattern, filename_lower)
+                for match in matches:
+                    if len(match) == 3:
+                        # Try to construct date string
+                        if len(match[2]) == 4:  # YYYY format
+                            month, day, year = match
+                            possible_dates.append(f"{day}/{month}/{year}")
+                            possible_dates.append(f"{int(day)}/{int(month)}/{year}")
+                        else:  # DD/MM/YYYY format
+                            day, month, year = match
+                            possible_dates.append(f"{day}/{month}/{year}")
+                            possible_dates.append(f"{int(day)}/{int(month)}/{year}")
+            
+            if possible_dates:
+                self.file_list.append((file_path, possible_dates))
+    
+    def _find_file_for_date(self, date_str):
+        """Find BD file for given date from pre-built file list."""
+        # Convert date to possible formats for matching
+        possible_date_formats = convert_date_for_bd_filename(date_str)
+        
+        # Check each file's possible dates
+        for file_path, file_dates in self.file_list:
+            filename_lower = file_path.name.lower()
+            # Check if any of our date formats match file's dates or filename
+            for date_format in possible_date_formats:
+                if date_format.lower() in filename_lower:
+                    return file_path
+            # Also check file's extracted dates
+            for file_date in file_dates:
+                for date_format in possible_date_formats:
+                    if date_format.lower() == file_date.lower():
+                        return file_path
+        
+        return None
+    
+    def get_workbook_for_date(self, date_str, show_progress=False):
+        """Get or load workbook for given date (loads file only when needed)."""
+        if date_str in self.cache:
+            return self.cache[date_str]
+        
+        # Find BD file from pre-built list
+        bd_file = self._find_file_for_date(date_str)
+        if not bd_file:
+            if show_progress:
+                print(f" (file not found)", end="", flush=True)
+            return None
+        
+        if show_progress:
+            print(f" (loading {bd_file.name})", end="", flush=True)
+        
+        
+        try:
+            # Check if we already have column info for this file
+            if bd_file in self.column_cache:
+                time_col, target_col, header_row = self.column_cache[bd_file]
+                # Load workbook (we already know columns, so just load once)
+                wb = openpyxl.load_workbook(bd_file, read_only=True, data_only=True)
+                
+                # Get the specified sheet or active sheet
+                if self.sheet_name:
+                    sheet_found = None
+                    sheet_name_lower = self.sheet_name.lower().strip()
+                    for name in wb.sheetnames:
+                        if name.strip().lower() == sheet_name_lower or sheet_name_lower in name.strip().lower():
+                            sheet_found = name
+                            break
+                    if sheet_found:
+                        ws = wb[sheet_found]
+                    else:
+                        return None
+                else:
+                    ws = wb.active
+            else:
+                # Load workbook ONCE to find columns AND use it
+                wb = openpyxl.load_workbook(bd_file, read_only=True, data_only=True)
+                
+                # Get the specified sheet or active sheet
+                if self.sheet_name:
+                    # Try to find sheet by name (case-insensitive, flexible matching)
+                    sheet_found = None
+                    sheet_name_lower = self.sheet_name.lower().strip()
+                    for name in wb.sheetnames:
+                        if name.strip().lower() == sheet_name_lower or sheet_name_lower in name.strip().lower():
+                            sheet_found = name
+                            break
+                    if sheet_found:
+                        ws = wb[sheet_found]
+                    else:
+                        wb.close()
+                        return None
+                else:
+                    ws = wb.active
+                
+                # Find columns
+                time_col = None
+                target_col = None
+                header_row = None
+                
+                for row_num in range(1, min(11, ws.max_row + 1)):
+                    for col_idx in range(1, min(ws.max_column + 1, 50)):
+                        cell = ws.cell(row=row_num, column=col_idx)
+                        if cell.value:
+                            header_val = str(cell.value).strip().lower()
+                            if "time" in header_val and time_col is None:
+                                time_col = col_idx
+                                if header_row is None:
+                                    header_row = row_num
+                            if self.column_name.lower() in header_val or header_val in self.column_name.lower():
+                                target_col = col_idx
+                                if header_row is None:
+                                    header_row = row_num
+                    
+                    if time_col and target_col:
+                        break
+                
+                if not time_col or not target_col:
+                    wb.close()
+                    return None
+                
+                # Cache column info for this file (for future dates using same file)
+                self.column_cache[bd_file] = (time_col, target_col, header_row)
+            
+            # Build time-to-row mapping efficiently (limit to reasonable number)
+            time_map = {}
+            data_start = header_row + 1
+            # Limit to 96 rows per day (15-min intervals * 24 hours) + buffer
+            max_rows = min(ws.max_row + 1, data_start + 150)
+            
+            for row_num in range(data_start, max_rows):
+                time_cell = ws.cell(row=row_num, column=time_col)
+                if time_cell.value is None:
+                    continue
+                
+                time_cell_raw = time_cell.value
+                
+                # Handle different time formats
+                time_norm = None
+                
+                # If it's a datetime object, extract time directly
+                if isinstance(time_cell_raw, datetime):
+                    time_norm = normalize_time_str(time_cell_raw.strftime("%H:%M:%S"))
+                else:
+                    time_cell_val = format_value(time_cell_raw)
+                    
+                    # Extract time from various formats:
+                    # "01/01/2026 20:15:00" -> "20:15"
+                    # "20:15:00" -> "20:15"
+                    # "20:15" -> "20:15"
+                    
+                    # If it contains a space, likely has date and time
+                    if " " in str(time_cell_val):
+                        parts = str(time_cell_val).split()
+                        # Get the last part which should be time
+                        if len(parts) > 1:
+                            time_part = parts[-1]
+                            time_norm = normalize_time_str(time_part)
+                    else:
+                        # Just time, normalize directly
+                        time_norm = normalize_time_str(time_cell_val)
+                
+                if time_norm:
+                    time_map[time_norm] = row_num
+                    # Also store variations (with/without seconds)
+                    if ":" in time_norm:
+                        time_parts = time_norm.split(":")
+                        if len(time_parts) == 3:  # Has seconds
+                            time_no_sec = f"{time_parts[0]}:{time_parts[1]}"
+                            if time_no_sec not in time_map:
+                                time_map[time_no_sec] = row_num
+            
+            cache_entry = (wb, ws, time_col, target_col, header_row, time_map)
+            self.cache[date_str] = cache_entry
+            
+            if show_progress and len(time_map) == 0:
+                print(f" (⚠ warning: time map empty)", end="", flush=True)
+            elif show_progress:
+                print(f" (✓ {len(time_map)} time slots mapped)", end="", flush=True)
+            
+            return cache_entry
+            
+        except Exception as e:
+            if show_progress:
+                print(f" (✗ error: {str(e)[:50]})", end="", flush=True)
+            return None
+    
+    def find_value(self, date_str, time_str, debug=False, show_progress=False):
+        """Find SCADA value for given date and time."""
+        cache_entry = self.get_workbook_for_date(date_str, show_progress=show_progress)
+        if not cache_entry:
+            return None
+        
+        wb, ws, time_col, target_col, header_row, time_map = cache_entry
+        
+        # Normalize time for lookup
+        time_norm = normalize_time_str(time_str)
+        
+        if debug:
+            print(f"\n    [DEBUG SCADA] Date: {date_str}, Time: '{time_str}' -> '{time_norm}'", file=sys.stderr)
+            print(f"    [DEBUG SCADA] Time map size: {len(time_map)}", file=sys.stderr)
+            if len(time_map) > 0:
+                sample_times = list(time_map.keys())[:10]
+                print(f"    [DEBUG SCADA] Sample times in map: {sample_times}", file=sys.stderr)
+            print(f"    [DEBUG SCADA] Columns: Time={time_col}, Target={target_col}, HeaderRow={header_row}", file=sys.stderr)
+        
+        # Look up row number from cache
+        row_num = time_map.get(time_norm)
+        if row_num:
+            target_cell = ws.cell(row=row_num, column=target_col)
+            value = target_cell.value
+            if debug:
+                print(f"    [DEBUG SCADA] ✓ Found in map: row {row_num}, value = {value}", file=sys.stderr)
+            return value
+        
+        if debug:
+            print(f"    [DEBUG SCADA] ✗ Not in map, searching manually...", file=sys.stderr)
+        
+        # Fallback: search if not in cache (limit search range)
+        data_start = header_row + 1
+        max_search = min(ws.max_row + 1, data_start + 200)  # Increased range
+        matches_checked = 0
+        for row_num in range(data_start, max_search):
+            time_cell = ws.cell(row=row_num, column=time_col)
+            if time_cell.value is None:
+                continue
+            
+            matches_checked += 1
+            time_cell_raw = time_cell.value
+            time_cell_val = format_value(time_cell_raw)
+            
+            if debug and matches_checked <= 5:
+                print(f"    [DEBUG SCADA] Row {row_num}: raw='{time_cell_raw}', formatted='{time_cell_val}'", file=sys.stderr)
+            
+            # Extract time part if it's a datetime string
+            time_cell_norm = None
+            if isinstance(time_cell_raw, datetime):
+                # Direct datetime object - extract time part
+                time_cell_norm = normalize_time_str(time_cell_raw.strftime("%H:%M:%S"))
+            elif " " in str(time_cell_val):
+                parts = str(time_cell_val).split()
+                if len(parts) > 1:
+                    time_part = parts[-1]
+                    time_cell_norm = normalize_time_str(time_part)
+            else:
+                time_cell_norm = normalize_time_str(time_cell_val)
+            
+            if debug and matches_checked <= 5:
+                print(f"    [DEBUG SCADA]   normalized='{time_cell_norm}', match={time_cell_norm == time_norm}", file=sys.stderr)
+            
+            # Match normalized times or check if time_norm is contained in cell value
+            if time_cell_norm == time_norm or time_norm in str(time_cell_val) or time_norm in str(time_cell_raw):
+                target_cell = ws.cell(row=row_num, column=target_col)
+                value = target_cell.value
+                if debug:
+                    print(f"    [DEBUG SCADA] ✓ Found manually: row {row_num}, value = {value}", file=sys.stderr)
+                return value
+        
+        if debug:
+            print(f"    [DEBUG SCADA] ✗ No match found after checking {matches_checked} rows", file=sys.stderr)
+        
+        return None
+    
+    def close_all(self):
+        """Close all cached workbooks."""
+        for cache_entry in self.cache.values():
+            if cache_entry:
+                wb = cache_entry[0]
+                try:
+                    wb.close()
+                except:
+                    pass
+        self.cache.clear()
+        self.column_cache.clear()
+
+
+def find_scada_value(scada_cache, date_str, time_str, debug=False, show_progress=False):
+    """
+    Find SCADA value using cached lookup.
+    """
+    if not scada_cache:
+        return None
+    
+    return scada_cache.find_value(date_str, time_str, debug=debug, show_progress=show_progress)
 
 
 def find_dc_value(dc_wb, sheet_name, from_time_str, to_time_str, debug=False):
@@ -423,6 +820,22 @@ def main():
         action="store_true",
         help="Enable verbose debug output for DC lookup",
     )
+    parser.add_argument(
+        "--bd-folder",
+        type=Path,
+        help="Path to BD folder containing SCADA files (default: data/BD)",
+        default=None,
+    )
+    parser.add_argument(
+        "--scada-column",
+        help="Column header name to extract from BD files (e.g., 'HNJA4_AG.STTN.X_BUS_GEN.MW')",
+        default=None,
+    )
+    parser.add_argument(
+        "--bd-sheet",
+        help="Sheet name to read from BD files (e.g., 'DATA-CMD'). If not specified, uses active sheet.",
+        default=None,
+    )
     
     args = parser.parse_args()
     
@@ -430,6 +843,41 @@ def main():
     if not xlsx_path.is_file():
         print(f"Error: File not found: {xlsx_path}", file=sys.stderr)
         sys.exit(1)
+    
+    # Resolve BD folder path
+    bd_folder = None
+    if args.bd_folder:
+        bd_folder = args.bd_folder
+        if not bd_folder.is_absolute():
+            # Try relative to input file directory first
+            bd_folder_relative = xlsx_path.parent / bd_folder
+            if bd_folder_relative.exists() and bd_folder_relative.is_dir():
+                bd_folder = bd_folder_relative
+            elif not bd_folder.exists():
+                # Try current directory
+                bd_folder_cwd = Path.cwd() / bd_folder
+                if bd_folder_cwd.exists() and bd_folder_cwd.is_dir():
+                    bd_folder = bd_folder_cwd
+                else:
+                    print(f"Warning: BD folder not found: {args.bd_folder}", file=sys.stderr)
+                    bd_folder = None
+        
+        if bd_folder and bd_folder.exists() and bd_folder.is_dir():
+            print(f"BD folder: {bd_folder}")
+        elif bd_folder:
+            print(f"Warning: BD folder is not a directory: {bd_folder}", file=sys.stderr)
+            bd_folder = None
+    elif args.scada_column:
+        # If scada-column is provided but no bd-folder, try default
+        default_bd = Path("data/BD")
+        if default_bd.exists() and default_bd.is_dir():
+            bd_folder = default_bd
+            print(f"BD folder (default): {bd_folder}")
+        else:
+            print(f"Warning: Default BD folder not found: {default_bd}", file=sys.stderr)
+    
+    if args.scada_column and not bd_folder:
+        print("Warning: SCADA column specified but BD folder not found. SCADA values will not be filled.", file=sys.stderr)
     
     # Load DC workbook if provided
     dc_wb = None
@@ -658,18 +1106,49 @@ def main():
     output_sheet['B1'] = 'From'
     output_sheet['C1'] = 'To'
     output_sheet['D1'] = 'DC (MW)'
+    output_sheet['E1'] = 'As per SLDC Scada in MW'
     
     # Apply header styles
-    for col in ['A1', 'B1', 'C1', 'D1']:
+    for col in ['A1', 'B1', 'C1', 'D1', 'E1']:
         cell = output_sheet[col]
         cell.font = header_font
         cell.alignment = center_align
         cell.border = thin_border
     
+    # Initialize SCADA cache if BD folder is provided (builds file list, loads files on demand)
+    scada_cache = None
+    if bd_folder and args.scada_column:
+        scada_cache = SCADALookupCache(bd_folder, args.scada_column, args.bd_sheet)
+        file_count = len(scada_cache.file_list)
+        sheet_info = f" (sheet: {args.bd_sheet})" if args.bd_sheet else " (active sheet)"
+        print(f"SCADA lookup ready for column: {args.scada_column}{sheet_info} ({file_count} BD files found, will load on demand)")
+    
     # Populate data rows
     row_idx = 2
     dc_found_count = 0
     dc_not_found_count = 0
+    scada_found_count = 0
+    scada_not_found_count = 0
+    
+    # Track progress for SCADA lookups
+    total_slots = 0
+    processed_slots = 0
+    current_date = None
+    
+    # Count total slots first (for progress calculation)
+    for idx, (row_num, row_data) in enumerate(matches, 1):
+        if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
+            from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
+            to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
+            if from_time_val is not None and to_time_val is not None:
+                slots = slots_15min(from_time_val, to_time_val)
+                total_slots += len(slots) if slots else 0
+    
+    print(f"\nProcessing {len(matches)} time range(s) with {total_slots} total time slots...")
+    if scada_cache:
+        print("Starting SCADA lookups...")
+        print("  Format: [Slot#] Date       | From  - To    | DC (MW)  | SCADA (MW)")
+        print("  " + "-" * 70)
     
     for idx, (row_num, row_data) in enumerate(matches, 1):
         if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
@@ -683,6 +1162,12 @@ def main():
                     date_str = format_value(date_val) if date_val else ""
                     
                     for slot_idx, (slot_from, slot_to) in enumerate(slots):
+                        # Show progress for new dates
+                        if date_str and date_str != current_date:
+                            current_date = date_str
+                            if scada_cache:
+                                print(f"\n  Processing date: {date_str}...", flush=True)
+                        
                         # Write date in first slot of each time range group
                         if slot_idx == 0 and date_str:
                             output_sheet.cell(row=row_idx, column=1).value = date_str
@@ -710,8 +1195,36 @@ def main():
                         
                         output_sheet.cell(row=row_idx, column=4).value = dc_value if dc_value is not None else ""
                         
+                        # Lookup SCADA value using cache
+                        scada_value = None
+                        if scada_cache and date_str:
+                            # Show progress only for first slot of each date (when loading file)
+                            show_progress_now = (slot_idx == 0)
+                            # Enable debug for first few lookups and when values are not found
+                            debug_scada = (args.verbose or (processed_slots < 5) or (scada_not_found_count < 3)) and slot_idx == 0
+                            scada_value = find_scada_value(scada_cache, date_str, slot_from, debug=debug_scada, show_progress=show_progress_now)
+                            
+                            # If not found and it's the first slot, show warning
+                            if scada_value is None and slot_idx == 0 and processed_slots == 0:
+                                print(f"    ⚠ Warning: No SCADA value found for {date_str} {slot_from}. Use --verbose for details.", file=sys.stderr)
+                            if scada_value is not None:
+                                scada_found_count += 1
+                            else:
+                                scada_not_found_count += 1
+                            
+                            # Increment counter
+                            processed_slots += 1
+                            
+                            # Show row with SCADA value
+                            date_display = date_str if slot_idx == 0 else ""  # Show date only for first slot
+                            scada_display = f"{scada_value:.2f}" if scada_value is not None else "---"
+                            dc_display = f"{dc_value:.2f}" if dc_value is not None else "---"
+                            print(f"    [{processed_slots:4d}/{total_slots}] {date_display:12s} | {slot_from:5s} - {slot_to:5s} | DC: {dc_display:8s} | SCADA: {scada_display:8s}", flush=True)
+                        
+                        output_sheet.cell(row=row_idx, column=5).value = scada_value if scada_value is not None else ""
+                        
                         # Apply borders
-                        for col in range(1, 5):
+                        for col in range(1, 6):
                             output_sheet.cell(row=row_idx, column=col).border = thin_border
                         
                         row_idx += 1
@@ -721,6 +1234,7 @@ def main():
     output_sheet.column_dimensions['B'].width = 10  # From
     output_sheet.column_dimensions['C'].width = 10  # To
     output_sheet.column_dimensions['D'].width = 12  # DC (MW)
+    output_sheet.column_dimensions['E'].width = 25  # As per SLDC Scada in MW
     
     # Generate output filename with station name and timestamp (human-readable format with AM/PM)
     # Best practice: Use dashes for all separators (safe on all OS, readable)
@@ -751,9 +1265,19 @@ def main():
             if dc_not_found_count > 0 and dc_found_count == 0:
                 print(f"  Warning: No DC values were found. Use --verbose for detailed debugging.")
     
+    if bd_folder and args.scada_column:
+        total_scada_lookups = scada_found_count + scada_not_found_count
+        if total_scada_lookups > 0:
+            print(f"\nSCADA Lookup Summary: {scada_found_count} found, {scada_not_found_count} not found (out of {total_scada_lookups} lookups)")
+            if scada_not_found_count > 0 and scada_found_count == 0:
+                print(f"  Warning: No SCADA values were found. Use --verbose for detailed debugging.")
+    
+    # Close all workbooks and caches
     wb.close()
     if dc_wb:
         dc_wb.close()
+    if scada_cache:
+        scada_cache.close_all()
 
 
 if __name__ == "__main__":
