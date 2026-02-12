@@ -796,8 +796,16 @@ def main():
     output_sheet.column_dimensions['C'].width = 10  # To
     output_sheet.column_dimensions['D'].width = 12  # DC (MW)
     
-    # Generate output filename with station name and timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Generate output filename with station name and timestamp (human-readable format with AM/PM)
+    # Best practice: Use dashes for all separators (safe on all OS, readable)
+    now = datetime.now()
+    date_part = now.strftime("%d-%b-%Y")
+    # Format time as "2-30-25-PM" (dashes instead of colons, no spaces, no leading zero on hour)
+    hour = now.hour % 12
+    if hour == 0:
+        hour = 12
+    time_part = f"{hour}-{now.minute:02d}-{now.second:02d}-{now.strftime('%p')}"
+    timestamp = f"{date_part}_{time_part}"
     station_safe = args.station_name.replace(" ", "_").replace("/", "_")
     output_filename = f"{station_safe}_{timestamp}.xlsx"
     output_path = xlsx_path.parent / output_filename
