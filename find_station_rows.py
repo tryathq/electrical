@@ -209,17 +209,12 @@ def find_dc_value(dc_wb, sheet_name, from_time_str, to_time_str, debug=False):
     
     if target_sheet is None:
         if debug:
-            print(f"  [DC Lookup] Sheet '{sheet_name}' not found.", file=sys.stderr)
-            print(f"  [DC Lookup] Looking for: '{sheet_name}' (normalized: '{sheet_name_lower}')", file=sys.stderr)
-            print(f"  [DC Lookup] Available sheets ({len(dc_wb.sheetnames)}):", file=sys.stderr)
-            for i, name in enumerate(dc_wb.sheetnames[:10]):
-                print(f"    {i+1}. '{name}'", file=sys.stderr)
-            if len(dc_wb.sheetnames) > 10:
-                print(f"    ... and {len(dc_wb.sheetnames) - 10} more", file=sys.stderr)
+            print(f"  [DC Lookup] Sheet '{sheet_name}' not found in DC file.", file=sys.stderr)
+            print(f"  [DC Lookup] Available sheets ({len(dc_wb.sheetnames)}): {', '.join(dc_wb.sheetnames[:5])}...", file=sys.stderr)
         return None
     
     if debug:
-        print(f"  [DC Lookup] ✓ Found sheet: '{target_sheet}' (looking for: '{sheet_name}')", file=sys.stderr)
+        print(f"  [DC Lookup] Found sheet: '{target_sheet}'", file=sys.stderr)
     
     ws = dc_wb[target_sheet]
     
@@ -277,32 +272,22 @@ def find_dc_value(dc_wb, sheet_name, from_time_str, to_time_str, debug=False):
     
     if not (from_col and to_col and final_revision_col):
         if debug:
-            print(f"  [DC Lookup] Columns not found. From={from_col}, To={to_col}, Final={final_revision_col}, HeaderRow={header_row}", file=sys.stderr)
-            if header_row:
-                print(f"  [DC Lookup] Header row {header_row} values:", file=sys.stderr)
-                for c in range(1, min(ws.max_column + 1, 10)):
-                    val = ws.cell(row=header_row, column=c).value
-                    if val:
-                        print(f"    Col {c}: {val}", file=sys.stderr)
+            print(f"  [DC Lookup] Required columns not found (From={from_col}, To={to_col}, Final={final_revision_col})", file=sys.stderr)
         return None
     
     if debug:
-        print(f"  [DC Lookup] Found columns: From={from_col}, To={to_col}, Final={final_revision_col}, HeaderRow={header_row}", file=sys.stderr)
+        print(f"  [DC Lookup] Columns found: From={from_col}, To={to_col}, Final={final_revision_col}", file=sys.stderr)
     
     # Normalize time strings for comparison
     from_time_norm = normalize_time_str(from_time_str)
     to_time_norm = normalize_time_str(to_time_str)
     
-    if debug:
-        print(f"  [DC Lookup] Looking for time range: {from_time_norm} - {to_time_norm}", file=sys.stderr)
-    
     # Search for matching time range
     data_start = header_row + 1
-    matches_checked = 0
-    max_rows_to_check = min(ws.max_row + 1, data_start + 200)  # Limit search to first 200 rows
+    max_rows_to_check = min(ws.max_row + 1, data_start + 200)
     
     if debug:
-        print(f"  [DC Lookup] Searching rows {data_start} to {max_rows_to_check-1} for time range", file=sys.stderr)
+        print(f"  [DC Lookup] Searching for time range: {from_time_norm} - {to_time_norm}", file=sys.stderr)
     
     for row_num in range(data_start, max_rows_to_check):
         from_cell = ws.cell(row=row_num, column=from_col)
@@ -312,40 +297,18 @@ def find_dc_value(dc_wb, sheet_name, from_time_str, to_time_str, debug=False):
             continue
         
         # Format and normalize cell values for comparison
-        from_val_raw = format_value(from_cell.value)
-        to_val_raw = format_value(to_cell.value)
-        from_val = normalize_time_str(from_val_raw)
-        to_val = normalize_time_str(to_val_raw)
-        
-        matches_checked += 1
-        
-        if debug and matches_checked <= 5:
-            print(f"  [DC Lookup] Row {row_num}: '{from_val_raw}' -> '{from_val}' / '{to_val_raw}' -> '{to_val}'", file=sys.stderr)
+        from_val = normalize_time_str(format_value(from_cell.value))
+        to_val = normalize_time_str(format_value(to_cell.value))
         
         # Match time range
         if from_val == from_time_norm and to_val == to_time_norm:
             dc_cell = ws.cell(row=row_num, column=final_revision_col)
-            dc_value = dc_cell.value
             if debug:
-                print(f"  [DC Lookup] ✓ MATCH! Row {row_num}: {from_val} - {to_val}, DC value: {dc_value}", file=sys.stderr)
-            return dc_value
+                print(f"  [DC Lookup] Match found at row {row_num}: DC value = {dc_cell.value}", file=sys.stderr)
+            return dc_cell.value
     
     if debug:
-        print(f"  [DC Lookup] ✗ No match found. Checked {matches_checked} rows.", file=sys.stderr)
-        print(f"  [DC Lookup] Looking for: '{from_time_norm}' - '{to_time_norm}'", file=sys.stderr)
-        # Show a few sample rows for comparison
-        print(f"  [DC Lookup] Sample rows checked:", file=sys.stderr)
-        sample_count = 0
-        for row_num in range(data_start, min(max_rows_to_check, data_start + 10)):
-            from_cell = ws.cell(row=row_num, column=from_col)
-            to_cell = ws.cell(row=row_num, column=to_col)
-            if from_cell.value is not None and to_cell.value is not None:
-                from_val = normalize_time_str(format_value(from_cell.value))
-                to_val = normalize_time_str(format_value(to_cell.value))
-                print(f"    Row {row_num}: {from_val} - {to_val}", file=sys.stderr)
-                sample_count += 1
-                if sample_count >= 5:
-                    break
+        print(f"  [DC Lookup] No match found for {from_time_norm} - {to_time_norm}", file=sys.stderr)
     
     return None
 
@@ -503,10 +466,7 @@ def main():
         if dc_path_resolved and dc_path_resolved.is_file():
             try:
                 dc_wb = openpyxl.load_workbook(dc_path_resolved, read_only=True, data_only=True)
-                print(f"DC file loaded: {dc_path_resolved}")
-                print(f"  Available sheets ({len(dc_wb.sheetnames)} total): {', '.join(dc_wb.sheetnames[:10])}{'...' if len(dc_wb.sheetnames) > 10 else ''}")
-                if len(dc_wb.sheetnames) > 10:
-                    print(f"  ... and {len(dc_wb.sheetnames) - 10} more sheets")
+                print(f"DC file loaded: {dc_path_resolved.name} ({len(dc_wb.sheetnames)} sheets)")
             except Exception as e:
                 print(f"Error loading DC file '{dc_path_resolved}': {e}", file=sys.stderr)
                 print("Continuing without DC values...", file=sys.stderr)
@@ -516,28 +476,6 @@ def main():
             for path_attempt in paths_to_try:
                 exists = "✓" if path_attempt.exists() else "✗"
                 print(f"    {exists} {path_attempt}", file=sys.stderr)
-            
-            # Try to find similar files
-            print(f"\n  Looking for similar files...", file=sys.stderr)
-            search_dirs = [xlsx_path.parent, Path.cwd()]
-            dc_filename_lower = str(args.dc_file).lower()
-            found_similar = []
-            
-            for search_dir in search_dirs:
-                if search_dir.exists() and search_dir.is_dir():
-                    try:
-                        for file in search_dir.glob("*.xlsx"):
-                            if dc_filename_lower in file.name.lower() or file.name.lower() in dc_filename_lower:
-                                found_similar.append(file)
-                    except:
-                        pass
-            
-            if found_similar:
-                print(f"  Found similar files:", file=sys.stderr)
-                for f in found_similar[:5]:
-                    print(f"    - {f}", file=sys.stderr)
-                if len(found_similar) > 5:
-                    print(f"    ... and {len(found_similar) - 5} more", file=sys.stderr)
             
             print("Continuing without DC values...", file=sys.stderr)
     
@@ -597,15 +535,20 @@ def main():
             header_val = str(header_cell.value).strip().lower()
             if "from" in header_val and "time" in header_val:
                 from_time_col = col_idx_header
-                print(f"Found 'From Time' column at column {openpyxl.utils.get_column_letter(col_idx_header)}")
             elif "to" in header_val and "time" in header_val:
                 to_time_col = col_idx_header
-                print(f"Found 'To Time' column at column {openpyxl.utils.get_column_letter(col_idx_header)}")
             elif "date" in header_val:
                 date_col = col_idx_header
-                print(f"Found 'Date' column at column {openpyxl.utils.get_column_letter(col_idx_header)}")
     
-    if not date_col:
+    if args.verbose:
+        if date_col:
+            print(f"Found 'Date' column at column {openpyxl.utils.get_column_letter(date_col)}")
+        if from_time_col:
+            print(f"Found 'From Time' column at column {openpyxl.utils.get_column_letter(from_time_col)}")
+        if to_time_col:
+            print(f"Found 'To Time' column at column {openpyxl.utils.get_column_letter(to_time_col)}")
+    
+    if not date_col and args.dc_file:
         print("Warning: Date column not found. DC lookup will not work.", file=sys.stderr)
     if not from_time_col or not to_time_col:
         print("Warning: From/To Time columns not found. Time slots will not be generated.", file=sys.stderr)
@@ -751,36 +694,19 @@ def main():
                         
                         # Lookup DC value if DC file is provided
                         dc_value = None
-                        if dc_wb:
-                            if date_str:
-                                sheet_name = convert_date_to_sheet_format(date_str)
-                                if sheet_name:
-                                    # Enable debug for first few lookups and first slot of each unique date
-                                    # Or if verbose flag is set
-                                    debug_lookup = args.verbose or (row_idx <= 15) or (slot_idx == 0 and dc_not_found_count < 10)
-                                    if debug_lookup:
-                                        print(f"\n  [Row {row_idx}] Looking up DC for: Date={date_str} -> Sheet='{sheet_name}', Time={slot_from}-{slot_to}", file=sys.stderr)
-                                    dc_value = find_dc_value(dc_wb, sheet_name, slot_from, slot_to, debug=debug_lookup)
-                                    if dc_value is not None:
-                                        dc_found_count += 1
-                                        if debug_lookup:
-                                            print(f"  [Row {row_idx}] ✓ DC value found: {dc_value}", file=sys.stderr)
-                                    else:
-                                        dc_not_found_count += 1
-                                        if debug_lookup:
-                                            print(f"  [Row {row_idx}] ✗ No DC value found", file=sys.stderr)
+                        if dc_wb and date_str:
+                            sheet_name = convert_date_to_sheet_format(date_str)
+                            if sheet_name:
+                                debug_lookup = args.verbose
+                                dc_value = find_dc_value(dc_wb, sheet_name, slot_from, slot_to, debug=debug_lookup)
+                                if dc_value is not None:
+                                    dc_found_count += 1
                                 else:
                                     dc_not_found_count += 1
-                                    if row_idx <= 10:
-                                        print(f"  [Row {row_idx}] ✗ Could not convert date '{date_str}' to sheet format", file=sys.stderr)
-                            else:
-                                # No date available for this slot - this shouldn't happen for first slot
-                                if slot_idx == 0:
-                                    print(f"  [Row {row_idx}] ⚠ Warning: No date available for DC lookup (first slot)", file=sys.stderr)
-                        else:
-                            # DC file not provided or not loaded
-                            if row_idx == 2:
-                                print(f"  [Row {row_idx}] ⚠ Warning: DC workbook not available for lookup", file=sys.stderr)
+                            elif args.verbose:
+                                print(f"  Warning: Could not convert date '{date_str}' to sheet format", file=sys.stderr)
+                        elif args.verbose and slot_idx == 0 and not dc_wb:
+                            print(f"  Warning: DC workbook not available for lookup", file=sys.stderr)
                         
                         output_sheet.cell(row=row_idx, column=4).value = dc_value if dc_value is not None else ""
                         
@@ -819,15 +745,11 @@ def main():
     print(f"\nOutput file created: {output_path}")
     
     if dc_wb:
-        print(f"\nDC Lookup Summary:")
-        print(f"  DC values found: {dc_found_count}")
-        print(f"  DC values not found: {dc_not_found_count}")
-        if dc_not_found_count > 0 and dc_found_count == 0:
-            print(f"\n  Warning: No DC values were found. Please check:")
-            print(f"    - Date format conversion (instructions date -> DC sheet name)")
-            print(f"    - Sheet names in DC file match date format")
-            print(f"    - Time format matches between files")
-            print(f"    - Column headers in DC file ('From', 'To', 'Final Revison')")
+        total_dc_lookups = dc_found_count + dc_not_found_count
+        if total_dc_lookups > 0:
+            print(f"\nDC Lookup Summary: {dc_found_count} found, {dc_not_found_count} not found (out of {total_dc_lookups} lookups)")
+            if dc_not_found_count > 0 and dc_found_count == 0:
+                print(f"  Warning: No DC values were found. Use --verbose for detailed debugging.")
     
     wb.close()
     if dc_wb:
