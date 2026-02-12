@@ -377,24 +377,32 @@ class SCADALookupCache:
                 else:
                     ws = wb.active
                 
-                # Find columns
+                # Find columns efficiently - limit column scan to first 30 columns
                 time_col = None
                 target_col = None
                 header_row = None
                 
+                # Scan first 10 rows, limit to first 30 columns
+                max_cols = min(30, ws.max_column + 1)
                 for row_num in range(1, min(11, ws.max_row + 1)):
-                    for col_idx in range(1, min(ws.max_column + 1, 50)):
-                        cell = ws.cell(row=row_num, column=col_idx)
-                        if cell.value:
-                            header_val = str(cell.value).strip().lower()
-                            if "time" in header_val and time_col is None:
-                                time_col = col_idx
-                                if header_row is None:
-                                    header_row = row_num
-                            if self.column_name.lower() in header_val or header_val in self.column_name.lower():
-                                target_col = col_idx
-                                if header_row is None:
-                                    header_row = row_num
+                    # Read row values in bulk (faster than cell-by-cell)
+                    row_data = next(ws.iter_rows(min_row=row_num, max_row=row_num, min_col=1, max_col=max_cols, values_only=True), None)
+                    if not row_data:
+                        continue
+                    
+                    for col_idx, cell_val in enumerate(row_data, start=1):
+                        if not cell_val:
+                            continue
+                        
+                        header_val = str(cell_val).strip().lower()
+                        if "time" in header_val and time_col is None:
+                            time_col = col_idx
+                            if header_row is None:
+                                header_row = row_num
+                        if self.column_name.lower() in header_val or header_val in self.column_name.lower():
+                            target_col = col_idx
+                            if header_row is None:
+                                header_row = row_num
                     
                     if time_col and target_col:
                         break
@@ -406,53 +414,39 @@ class SCADALookupCache:
                 # Cache column info for this file (for future dates using same file)
                 self.column_cache[bd_file] = (time_col, target_col, header_row)
             
-            # Build time-to-row mapping efficiently (limit to reasonable number)
+            # Build time-to-row mapping efficiently using iter_rows for faster reading
             time_map = {}
             data_start = header_row + 1
-            # Limit to 96 rows per day (15-min intervals * 24 hours) + buffer
-            max_rows = min(ws.max_row + 1, data_start + 150)
+            # Limit to 100 rows (enough for one day: 96 slots + buffer)
+            max_rows = min(ws.max_row + 1, data_start + 100)
             
-            for row_num in range(data_start, max_rows):
-                time_cell = ws.cell(row=row_num, column=time_col)
-                if time_cell.value is None:
+            # Use iter_rows for faster reading (reads entire row at once)
+            row_num = data_start
+            for row_tuple in ws.iter_rows(min_row=data_start, max_row=max_rows - 1, min_col=time_col, max_col=time_col, values_only=True):
+                if not row_tuple or row_tuple[0] is None:
+                    row_num += 1
                     continue
+                    
+                time_cell_raw = row_tuple[0]
                 
-                time_cell_raw = time_cell.value
-                
-                # Handle different time formats
+                # Extract time quickly - avoid format_value() for speed
                 time_norm = None
-                
-                # If it's a datetime object, extract time directly
                 if isinstance(time_cell_raw, datetime):
-                    time_norm = normalize_time_str(time_cell_raw.strftime("%H:%M:%S"))
+                    # Direct datetime - extract HH:MM directly (fastest path)
+                    time_norm = f"{time_cell_raw.hour:02d}:{time_cell_raw.minute:02d}"
                 else:
-                    time_cell_val = format_value(time_cell_raw)
-                    
-                    # Extract time from various formats:
-                    # "01/01/2026 20:15:00" -> "20:15"
-                    # "20:15:00" -> "20:15"
-                    # "20:15" -> "20:15"
-                    
-                    # If it contains a space, likely has date and time
-                    if " " in str(time_cell_val):
-                        parts = str(time_cell_val).split()
-                        # Get the last part which should be time
-                        if len(parts) > 1:
-                            time_part = parts[-1]
-                            time_norm = normalize_time_str(time_part)
+                    time_str = str(time_cell_raw)
+                    # Extract time part (last part after space if present)
+                    if " " in time_str:
+                        time_part = time_str.split()[-1]
+                        time_norm = normalize_time_str(time_part)
                     else:
-                        # Just time, normalize directly
-                        time_norm = normalize_time_str(time_cell_val)
+                        time_norm = normalize_time_str(time_str)
                 
                 if time_norm:
                     time_map[time_norm] = row_num
-                    # Also store variations (with/without seconds)
-                    if ":" in time_norm:
-                        time_parts = time_norm.split(":")
-                        if len(time_parts) == 3:  # Has seconds
-                            time_no_sec = f"{time_parts[0]}:{time_parts[1]}"
-                            if time_no_sec not in time_map:
-                                time_map[time_no_sec] = row_num
+                
+                row_num += 1
             
             cache_entry = (wb, ws, time_col, target_col, header_row, time_map)
             self.cache[date_str] = cache_entry
@@ -741,12 +735,14 @@ def main():
         description="Find rows in XLSX file where 'Name of the station' column matches given station name."
     )
     parser.add_argument(
-        "xlsx_path",
+        "--instructions-file",
         type=Path,
-        help="Path to the XLSX file",
+        required=True,
+        help="Path to the instructions XLSX file",
     )
     parser.add_argument(
-        "station_name",
+        "--station",
+        required=True,
         help="Station name to search for (e.g., HINDUJA)",
     )
     parser.add_argument(
@@ -806,7 +802,7 @@ def main():
     
     args = parser.parse_args()
     
-    xlsx_path = args.xlsx_path
+    xlsx_path = args.instructions_file
     if not xlsx_path.is_file():
         print(f"Error: File not found: {xlsx_path}", file=sys.stderr)
         sys.exit(1)
@@ -916,7 +912,7 @@ def main():
         sys.exit(1)
     
     # Find matching rows
-    matches = find_matching_rows(ws, col_idx, args.station_name, header_row)
+    matches = find_matching_rows(ws, col_idx, args.station, header_row)
     
     # Try to find "From Time" and "To Time" columns for 15-minute extraction
     from_time_col = None
@@ -940,7 +936,7 @@ def main():
         print("Warning: From/To Time columns not found.", file=sys.stderr)
     
     if not matches:
-        print(f"No rows found where '{args.column}' = '{args.station_name}'")
+        print(f"No rows found where '{args.column}' = '{args.station}'")
         wb.close()
         sys.exit(0)
     
@@ -1090,7 +1086,7 @@ def main():
         hour = 12
     time_part = f"{hour}-{now.minute:02d}-{now.second:02d}-{now.strftime('%p')}"
     timestamp = f"{date_part}_{time_part}"
-    station_safe = args.station_name.replace(" ", "_").replace("/", "_")
+    station_safe = args.station.replace(" ", "_").replace("/", "_")
     output_filename = f"{station_safe}_{timestamp}.xlsx"
     
     # Create output directory if it doesn't exist
