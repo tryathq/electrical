@@ -406,7 +406,6 @@ def main():
     
     # Populate data rows
     row_idx = 2
-    prev_date = None
     
     for idx, (row_num, row_data) in enumerate(matches, 1):
         if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
@@ -419,13 +418,12 @@ def main():
                 if slots:
                     date_str = format_value(date_val) if date_val else ""
                     
-                    for slot_from, slot_to in slots:
-                        # Only write date in first row of each date group
-                        if date_str and date_str != prev_date:
+                    for slot_idx, (slot_from, slot_to) in enumerate(slots):
+                        # Write date in first slot of each time range group
+                        if slot_idx == 0 and date_str:
                             output_sheet.cell(row=row_idx, column=1).value = date_str
-                            prev_date = date_str
                         else:
-                            output_sheet.cell(row=row_idx, column=1).value = ""  # Empty for same date
+                            output_sheet.cell(row=row_idx, column=1).value = ""  # Empty for subsequent slots in same range
                         
                         output_sheet.cell(row=row_idx, column=2).value = slot_from
                         output_sheet.cell(row=row_idx, column=3).value = slot_to
