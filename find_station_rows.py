@@ -340,6 +340,8 @@ class SCADALookupCache:
             if bd_file in self.column_cache:
                 time_col, target_col, header_row = self.column_cache[bd_file]
                 # Load workbook (we already know columns, so just load once)
+                if show_progress:
+                    print(".", end="", flush=True)  # Progress: opening file
                 wb = openpyxl.load_workbook(bd_file, read_only=True, data_only=True)
                 
                 # Get the specified sheet or active sheet
@@ -358,6 +360,8 @@ class SCADALookupCache:
                     ws = wb.active
             else:
                 # Load workbook ONCE to find columns AND use it
+                if show_progress:
+                    print(".", end="", flush=True)  # Progress: opening file
                 wb = openpyxl.load_workbook(bd_file, read_only=True, data_only=True)
                 
                 # Get the specified sheet or active sheet
@@ -378,15 +382,22 @@ class SCADALookupCache:
                     ws = wb.active
                 
                 # Find columns efficiently - limit column scan to first 30 columns
+                if show_progress:
+                    print(".", end="", flush=True)  # Progress: finding columns
                 time_col = None
                 target_col = None
                 header_row = None
                 
                 # Scan first 10 rows, limit to first 30 columns
-                max_cols = min(30, ws.max_column + 1)
-                for row_num in range(1, min(11, ws.max_row + 1)):
+                # Avoid calling max_column/max_row if possible (can be slow for large files)
+                max_cols = 30  # Fixed limit, don't query max_column
+                max_header_rows = 10  # Fixed limit, don't query max_row
+                for row_num in range(1, max_header_rows + 1):
                     # Read row values in bulk (faster than cell-by-cell)
-                    row_data = next(ws.iter_rows(min_row=row_num, max_row=row_num, min_col=1, max_col=max_cols, values_only=True), None)
+                    try:
+                        row_data = next(ws.iter_rows(min_row=row_num, max_row=row_num, min_col=1, max_col=max_cols, values_only=True), None)
+                    except StopIteration:
+                        break
                     if not row_data:
                         continue
                     
@@ -415,14 +426,18 @@ class SCADALookupCache:
                 self.column_cache[bd_file] = (time_col, target_col, header_row)
             
             # Build time-to-row mapping efficiently using iter_rows for faster reading
+            if show_progress:
+                print(".", end="", flush=True)  # Progress: building time map
             time_map = {}
             data_start = header_row + 1
             # Limit to 100 rows (enough for one day: 96 slots + buffer)
-            max_rows = min(ws.max_row + 1, data_start + 100)
+            # Don't query max_row - just read fixed number of rows
+            max_rows_to_read = 100
             
             # Use iter_rows for faster reading (reads entire row at once)
             row_num = data_start
-            for row_tuple in ws.iter_rows(min_row=data_start, max_row=max_rows - 1, min_col=time_col, max_col=time_col, values_only=True):
+            try:
+                for row_tuple in ws.iter_rows(min_row=data_start, max_row=data_start + max_rows_to_read - 1, min_col=time_col, max_col=time_col, values_only=True):
                 if not row_tuple or row_tuple[0] is None:
                     row_num += 1
                     continue
@@ -443,13 +458,22 @@ class SCADALookupCache:
                     else:
                         time_norm = normalize_time_str(time_str)
                 
-                if time_norm:
-                    time_map[time_norm] = row_num
-                
-                row_num += 1
+                    if time_norm:
+                        time_map[time_norm] = row_num
+                    
+                    row_num += 1
+                    
+                    # Stop early if we've read enough rows
+                    if row_num >= data_start + max_rows_to_read:
+                        break
+            except StopIteration:
+                pass  # End of data
             
             cache_entry = (wb, ws, time_col, target_col, header_row, time_map)
             self.cache[date_str] = cache_entry
+            
+            if show_progress:
+                print("✓", end="", flush=True)  # Progress: done loading
             
             return cache_entry
             
