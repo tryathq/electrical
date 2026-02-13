@@ -913,11 +913,12 @@ if 'display_output_data_key' in st.session_state:
             st.divider()
             st.header(f"📊 {table_title}")
             
-            # Search and filter controls
-            col_search1, col_search2 = st.columns([2, 1])
+            # Search, filter, and pagination controls (same row)
+            search_key = f"{output_data_key}_search"
+            rows_key = f"{output_data_key}_rows_per_page"
+            page_key = f"{output_data_key}_page"
+            col_search1, col_search2, col_page = st.columns([4, 0.75, 0.75])
             with col_search1:
-                search_key = f"{output_data_key}_search"
-                # Get current search value from session_state, default to empty string
                 current_search = st.session_state.get(search_key, "")
                 search_term = st.text_input(
                     "🔍 Search",
@@ -928,7 +929,6 @@ if 'display_output_data_key' in st.session_state:
                 )
             with col_search2:
                 rows_options = [10, 25, 50, 100, 500]
-                rows_key = f"{output_data_key}_rows_per_page"
                 default_rows = st.session_state.get(rows_key, 25)
                 default_idx = rows_options.index(default_rows) if default_rows in rows_options else 1
                 rows_per_page = st.selectbox(
@@ -939,7 +939,7 @@ if 'display_output_data_key' in st.session_state:
                     key=rows_key
                 )
             
-            # Apply search filter
+            # Apply search filter and compute pagination
             if search_term:
                 mask = df_output.astype(str).apply(
                     lambda x: x.str.contains(search_term, case=False, na=False)
@@ -948,32 +948,42 @@ if 'display_output_data_key' in st.session_state:
             else:
                 df_filtered = df_output.copy()
             
-            # Pagination
             total_rows = len(df_filtered)
             total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
-            
-            page_key = f"{output_data_key}_page"
             current_page = st.session_state.get(page_key, 1)
-            # Reset to page 1 if current page exceeds total pages (before widget creation)
             if current_page > total_pages:
                 current_page = 1
             
-            if total_pages > 1:
-                page_num = st.number_input(
-                    f"Page (1-{total_pages})",
-                    min_value=1,
-                    max_value=total_pages,
-                    value=current_page,
-                    step=1,
-                    key=page_key
-                )
-                start_idx = (page_num - 1) * rows_per_page
-                end_idx = start_idx + rows_per_page
-                df_display = df_filtered.iloc[start_idx:end_idx].copy()
-                st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
-            else:
-                df_display = df_filtered.copy()
-                st.caption(f"Showing all {total_rows} rows")
+            with col_page:
+                if total_pages > 1:
+                    # Label to align with Search / Rows per page inputs
+                    st.markdown(
+                        '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem;">Page</div>',
+                        unsafe_allow_html=True
+                    )
+                    col_prev, col_info, col_next = st.columns([1, 1.5, 1])
+                    with col_prev:
+                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", use_container_width=True)
+                        if prev_clicked:
+                            st.session_state[page_key] = max(1, current_page - 1)
+                            st.rerun()
+                    with col_info:
+                        st.markdown(
+                            f"<div style='display: flex; align-items: center; justify-content: center; min-height: 38px; font-weight: 500; font-size: 14px;'>{current_page}/{total_pages}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with col_next:
+                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", use_container_width=True)
+                        if next_clicked:
+                            st.session_state[page_key] = min(total_pages, current_page + 1)
+                            st.rerun()
+                    page_num = current_page
+                else:
+                    page_num = 1
+            
+            start_idx = (page_num - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+            df_display = df_filtered.iloc[start_idx:end_idx].copy()
             
             # Display table with sorting
             if AGGrid_AVAILABLE:
@@ -1008,7 +1018,11 @@ if 'display_output_data_key' in st.session_state:
                     height=400,
                     hide_index=True
                 )
-                st.caption("💡 Tip: Install streamlit-aggrid for advanced filtering and sorting: pip install streamlit-aggrid")
+            
+            if total_pages > 1:
+                st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
+            else:
+                st.caption(f"Showing all {total_rows} rows")
             
             # Download button - also show below table
             st.divider()
