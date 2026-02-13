@@ -19,7 +19,8 @@ from datetime import datetime, date, time
 
 try:
     import openpyxl
-    from openpyxl.styles import Font, Alignment, Border, Side
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.utils import get_column_letter
 except ImportError:
     print("Install openpyxl: pip install openpyxl", file=sys.stderr)
     sys.exit(1)
@@ -978,18 +979,23 @@ def main():
         top=Side(style='thin'),
         bottom=Side(style='thin')
     )
-    
+    gray_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')  # Light gray
+
+    # No padding: content starts at A1
+    pad = 0
+    header_row, start_col, start_data_row = 1 + pad, 1 + pad, 2 + pad
+
     # Headers
-    output_sheet['A1'] = 'Date'
-    output_sheet['B1'] = 'From'
-    output_sheet['C1'] = 'To'
-    output_sheet['D1'] = 'DC (MW)'
-    output_sheet['E1'] = 'As per SLDC Scada in MW'
-    output_sheet['F1'] = 'Diff (MW)'
-    
+    output_sheet.cell(row=header_row, column=start_col).value = 'Date'
+    output_sheet.cell(row=header_row, column=start_col + 1).value = 'From'
+    output_sheet.cell(row=header_row, column=start_col + 2).value = 'To'
+    output_sheet.cell(row=header_row, column=start_col + 3).value = 'DC (MW)'
+    output_sheet.cell(row=header_row, column=start_col + 4).value = 'As per SLDC Scada in MW'
+    output_sheet.cell(row=header_row, column=start_col + 5).value = 'Diff (MW)'
+
     # Apply header styles
-    for col in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1']:
-        cell = output_sheet[col]
+    for c in range(6):
+        cell = output_sheet.cell(row=header_row, column=start_col + c)
         cell.font = header_font
         cell.alignment = center_align
         cell.border = thin_border
@@ -1000,7 +1006,7 @@ def main():
         scada_cache = SCADALookupCache(bd_folder, args.scada_column, args.bd_sheet)
     
     # Populate data rows
-    row_idx = 2
+    row_idx = start_data_row
     dc_found_count = 0
     dc_not_found_count = 0
     scada_found_count = 0
@@ -1043,12 +1049,12 @@ def main():
                         
                         # Write date in first slot of each time range group
                         if slot_idx == 0 and date_str:
-                            output_sheet.cell(row=row_idx, column=1).value = date_str
+                            output_sheet.cell(row=row_idx, column=start_col).value = date_str
                         else:
-                            output_sheet.cell(row=row_idx, column=1).value = ""  # Empty for subsequent slots in same range
+                            output_sheet.cell(row=row_idx, column=start_col).value = ""  # Empty for subsequent slots in same range
                         
-                        output_sheet.cell(row=row_idx, column=2).value = slot_from
-                        output_sheet.cell(row=row_idx, column=3).value = slot_to
+                        output_sheet.cell(row=row_idx, column=start_col + 1).value = slot_from
+                        output_sheet.cell(row=row_idx, column=start_col + 2).value = slot_to
                         
                         # Lookup DC value if DC file is provided
                         dc_value = None
@@ -1066,7 +1072,7 @@ def main():
                         elif args.verbose and slot_idx == 0 and not dc_wb:
                             print(f"  Warning: DC workbook not available for lookup", file=sys.stderr)
                         
-                        output_sheet.cell(row=row_idx, column=4).value = dc_value if dc_value is not None else ""
+                        output_sheet.cell(row=row_idx, column=start_col + 3).value = dc_value if dc_value is not None else ""
                         
                         # Lookup SCADA value using cache
                         scada_value = None
@@ -1086,7 +1092,7 @@ def main():
                             elif processed_slots % 50 == 0:
                                 print(".", end="", flush=True)
                         
-                        output_sheet.cell(row=row_idx, column=5).value = scada_value if scada_value is not None else ""
+                        output_sheet.cell(row=row_idx, column=start_col + 4).value = scada_value if scada_value is not None else ""
                         
                         # Calculate difference: DC - SCADA
                         diff_value = None
@@ -1099,24 +1105,45 @@ def main():
                             except (ValueError, TypeError):
                                 pass  # Keep as None if conversion fails
                         
-                        output_sheet.cell(row=row_idx, column=6).value = diff_value if diff_value is not None else ""
-                        
+                        output_sheet.cell(row=row_idx, column=start_col + 5).value = diff_value if diff_value is not None else ""
+
                         # Apply borders
-                        for col in range(1, 7):
-                            output_sheet.cell(row=row_idx, column=col).border = thin_border
+                        for c in range(6):
+                            output_sheet.cell(row=row_idx, column=start_col + c).border = thin_border
                         
                         row_idx += 1
-    
-    # Freeze header row so it stays visible on scroll
-    output_sheet.freeze_panes = 'A2'
 
-    # Adjust column widths
-    output_sheet.column_dimensions['A'].width = 15  # Date
-    output_sheet.column_dimensions['B'].width = 10  # From
-    output_sheet.column_dimensions['C'].width = 10  # To
-    output_sheet.column_dimensions['D'].width = 12  # DC (MW)
-    output_sheet.column_dimensions['E'].width = 25  # As per SLDC Scada in MW
-    output_sheet.column_dimensions['F'].width = 12  # Diff (MW)
+    # Gray background for entire sheet except content (header + data in B2:G)
+    last_row = row_idx - 1
+    last_content_col = start_col + 5  # G
+    right_pad_col = last_content_col + 1  # H
+    # Cover full sheet (10K rows × 50 cols) - only non-content cells filled
+    max_fill_row, max_fill_col = 10000, 50
+    # Fill only non-content cells (avoid iterating content area)
+    for r in range(1, header_row):
+        for c in range(1, max_fill_col + 1):
+            output_sheet.cell(row=r, column=c).fill = gray_fill
+    for r in range(header_row, last_row + 1):
+        for c in range(1, start_col):
+            output_sheet.cell(row=r, column=c).fill = gray_fill
+        for c in range(last_content_col + 1, max_fill_col + 1):
+            output_sheet.cell(row=r, column=c).fill = gray_fill
+    for r in range(last_row + 1, max_fill_row + 1):
+        for c in range(1, max_fill_col + 1):
+            output_sheet.cell(row=r, column=c).fill = gray_fill
+
+    # Freeze header row so it stays visible on scroll
+    output_sheet.freeze_panes = output_sheet.cell(row=start_data_row, column=start_col).coordinate
+
+    # Hide gridlines so only content cells (with borders) are visible
+    output_sheet.sheet_view.showGridLines = False
+
+    # Adjust column widths (A through F)
+    for i, w in enumerate([15, 10, 10, 12, 25, 12]):  # Date, From, To, DC, SCADA, Diff
+        output_sheet.column_dimensions[get_column_letter(start_col + i)].width = w
+
+    # Limit print area to content only
+    output_sheet.print_area = f'A1:{get_column_letter(last_content_col)}{last_row}'
     
     # Generate output filename with station name and timestamp (human-readable format with AM/PM)
     # Best practice: Use dashes for all separators (safe on all OS, readable)
