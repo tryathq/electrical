@@ -1107,6 +1107,9 @@ def main():
                         
                         row_idx += 1
     
+    # Freeze header row so it stays visible on scroll
+    output_sheet.freeze_panes = 'A2'
+
     # Adjust column widths
     output_sheet.column_dimensions['A'].width = 15  # Date
     output_sheet.column_dimensions['B'].width = 10  # From
