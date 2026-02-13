@@ -668,7 +668,6 @@ if st.button("🚀 Generate", type="primary", use_container_width=True):
                                 if date_start_row is not None and row_idx > date_start_row:
                                     date_col_letter = get_column_letter(start_col)
                                     output_sheet.merge_cells(f"{date_col_letter}{date_start_row}:{date_col_letter}{row_idx - 1}")
-                                row_idx += 1
                                 date_start_row = None
                             
                             if date_str and date_str != current_date:
@@ -819,31 +818,6 @@ if st.button("🚀 Generate", type="primary", use_container_width=True):
             st.code(traceback.format_exc())
 
 # Display output data if available (persists across reruns)
-# Download button - always show if output file exists (before data display)
-if 'last_output_file_data' in st.session_state:
-    st.divider()
-    st.download_button(
-        label="📥 Download Output File",
-        data=st.session_state['last_output_file_data'],
-        file_name=st.session_state.get('last_output_filename', 'output.xlsx'),
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="download_button_top"
-    )
-elif 'last_output_path' in st.session_state:
-    output_path = Path(st.session_state['last_output_path'])
-    if output_path.exists():
-        st.divider()
-        with open(output_path, "rb") as f:
-            st.download_button(
-                label="📥 Download Output File",
-                data=f.read(),
-                file_name=st.session_state.get('last_output_filename', 'output.xlsx'),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="download_button_top"
-            )
-
 if 'display_output_data_key' in st.session_state:
     output_data_key = st.session_state['display_output_data_key']
     station_name = st.session_state.get('display_station_name', '')
@@ -913,12 +887,12 @@ if 'display_output_data_key' in st.session_state:
             st.divider()
             st.header(f"📊 {table_title}")
             
-            # Search, filter, and pagination controls (same row)
+            # Search and Download (same row)
             search_key = f"{output_data_key}_search"
             rows_key = f"{output_data_key}_rows_per_page"
             page_key = f"{output_data_key}_page"
-            col_search1, col_search2, col_page = st.columns([4, 0.75, 0.75])
-            with col_search1:
+            col_search, col_download = st.columns([3, 1])
+            with col_search:
                 current_search = st.session_state.get(search_key, "")
                 search_term = st.text_input(
                     "🔍 Search",
@@ -927,19 +901,43 @@ if 'display_output_data_key' in st.session_state:
                     help="Filter rows by searching across all columns",
                     key=search_key
                 )
-            with col_search2:
-                rows_options = [10, 25, 50, 100, 500]
-                default_rows = st.session_state.get(rows_key, 25)
-                default_idx = rows_options.index(default_rows) if default_rows in rows_options else 1
-                rows_per_page = st.selectbox(
-                    "Rows per page",
-                    options=rows_options,
-                    index=default_idx,
-                    help="Number of rows to display per page",
-                    key=rows_key
+            with col_download:
+                # Spacer to align Download button with Search input (match label height)
+                st.markdown(
+                    '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;">&nbsp;</div>',
+                    unsafe_allow_html=True
                 )
+                if 'last_output_file_data' in st.session_state:
+                    file_data = st.session_state['last_output_file_data']
+                    download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
+                    st.download_button(
+                        label="📥 Download Output File",
+                        data=file_data,
+                        file_name=download_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="download_button_output"
+                    )
+                elif 'last_output_path' in st.session_state:
+                    output_path = Path(st.session_state['last_output_path'])
+                    if output_path.exists():
+                        try:
+                            with open(output_path, "rb") as f:
+                                file_data = f.read()
+                            download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
+                            st.download_button(
+                                label="📥 Download Output File",
+                                data=file_data,
+                                file_name=download_filename,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key="download_button_output"
+                            )
+                        except Exception:
+                            pass
             
             # Apply search filter and compute pagination
+            rows_per_page = st.session_state.get(rows_key, 25)
             if search_term:
                 mask = df_output.astype(str).apply(
                     lambda x: x.str.contains(search_term, case=False, na=False)
@@ -953,33 +951,7 @@ if 'display_output_data_key' in st.session_state:
             current_page = st.session_state.get(page_key, 1)
             if current_page > total_pages:
                 current_page = 1
-            
-            with col_page:
-                if total_pages > 1:
-                    # Label to align with Search / Rows per page inputs
-                    st.markdown(
-                        '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem;">Page</div>',
-                        unsafe_allow_html=True
-                    )
-                    col_prev, col_info, col_next = st.columns([1, 1.5, 1])
-                    with col_prev:
-                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", use_container_width=True)
-                        if prev_clicked:
-                            st.session_state[page_key] = max(1, current_page - 1)
-                            st.rerun()
-                    with col_info:
-                        st.markdown(
-                            f"<div style='display: flex; align-items: center; justify-content: center; min-height: 38px; font-weight: 500; font-size: 14px;'>{current_page}/{total_pages}</div>",
-                            unsafe_allow_html=True
-                        )
-                    with col_next:
-                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", use_container_width=True)
-                        if next_clicked:
-                            st.session_state[page_key] = min(total_pages, current_page + 1)
-                            st.rerun()
-                    page_num = current_page
-                else:
-                    page_num = 1
+            page_num = current_page
             
             start_idx = (page_num - 1) * rows_per_page
             end_idx = start_idx + rows_per_page
@@ -1019,43 +991,45 @@ if 'display_output_data_key' in st.session_state:
                     hide_index=True
                 )
             
-            if total_pages > 1:
-                st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
-            else:
-                st.caption(f"Showing all {total_rows} rows")
-            
-            # Download button - also show below table
-            st.divider()
-            # Use file data from session_state if available, otherwise try to read from path
-            if 'last_output_file_data' in st.session_state:
-                # Use stored file data (persists even if temp file is deleted)
-                file_data = st.session_state['last_output_file_data']
-                download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
-                st.download_button(
-                    label="📥 Download Output File",
-                    data=file_data,
-                    file_name=download_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="download_button_bottom"
-                )
-            elif 'last_output_path' in st.session_state:
-                # Fallback: try to read from file path
-                output_path = Path(st.session_state['last_output_path'])
-                if output_path.exists():
-                    try:
-                        with open(output_path, "rb") as f:
-                            file_data = f.read()
-                        download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
-                        st.download_button(
-                            label="📥 Download Output File",
-                            data=file_data,
-                            file_name=download_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key="download_button_bottom"
-                        )
-                    except Exception as e:
-                        st.error(f"Error reading file: {e}")
+            # Bottom row: caption left, Rows per page + Page nav right
+            col_caption, col_nav = st.columns([2, 1])
+            with col_caption:
+                if total_pages > 1:
+                    st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
                 else:
-                    st.warning("Output file not found. Please regenerate the report.")
+                    st.caption(f"Showing all {total_rows} rows")
+            with col_nav:
+                rows_options = [10, 25, 50, 100, 500]
+                default_rows = st.session_state.get(rows_key, 25)
+                default_idx = rows_options.index(default_rows) if default_rows in rows_options else 1
+                col_rows, col_prev, col_info, col_next = st.columns([1.2, 0.6, 0.8, 0.6])
+                with col_rows:
+                    st.selectbox(
+                        "Rows per page",
+                        options=rows_options,
+                        index=default_idx,
+                        help="Number of rows to display per page",
+                        key=rows_key,
+                        label_visibility="visible"
+                    )
+                if total_pages > 1:
+                    label_style = 'font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;'
+                    with col_prev:
+                        st.markdown(f'<div style="{label_style}">Page</div>', unsafe_allow_html=True)
+                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", use_container_width=True)
+                        if prev_clicked:
+                            st.session_state[page_key] = max(1, current_page - 1)
+                            st.rerun()
+                    with col_info:
+                        st.markdown(f'<div style="{label_style}">&nbsp;</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f"<div style='display: flex; align-items: center; justify-content: center; min-height: 38px; font-weight: 500; font-size: 14px;'>{current_page}/{total_pages}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with col_next:
+                        st.markdown(f'<div style="{label_style}">&nbsp;</div>', unsafe_allow_html=True)
+                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", use_container_width=True)
+                        if next_clicked:
+                            st.session_state[page_key] = min(total_pages, current_page + 1)
+                            st.rerun()
+            
