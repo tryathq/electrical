@@ -842,6 +842,10 @@ if 'display_output_data_key' in st.session_state:
                 st.info(f"SCADA Lookups: {stats['scada_found']} found, {stats['scada_not_found']} not found")
         
         if df_output is not None and not df_output.empty:
+            # Replace NaN/None with empty string for display (Date and other columns)
+            df_output = df_output.fillna("")
+            df_output = df_output.replace("None", "")
+            
             # Create dynamic table title based on station and date range
             title_parts = ["calculation sheet for BD and non compliance of", station_name]
             
