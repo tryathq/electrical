@@ -764,6 +764,13 @@ if st.button("🚀 Generate", type="primary", use_container_width=True):
             output_path = temp_path / output_filename
             output_wb.save(output_path)
             
+            # Store output filename and path in session_state for persistence across reruns
+            st.session_state['last_output_filename'] = output_filename
+            st.session_state['last_output_path'] = str(output_path)
+            # Also store file data in session_state so it persists even if temp file is deleted
+            with open(output_path, "rb") as f:
+                st.session_state['last_output_file_data'] = f.read()
+            
             progress_bar.progress(100)
             status_text.text("✅ Processing complete!")
             
@@ -779,165 +786,262 @@ if st.button("🚀 Generate", type="primary", use_container_width=True):
             # Display summary
             st.success("✅ Output file generated successfully!")
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Rows", len(matches))
-            with col2:
-                st.metric("Total Slots", total_slots)
-            with col3:
-                st.metric("Output Rows", last_row - 1)
+            # Load output data for display - store in session state to persist across reruns
+            output_data_key = f"output_data_{output_filename}"
             
-            if dc_wb:
-                st.info(f"DC Lookups: {dc_found_count} found, {dc_not_found_count} not found")
-            if scada_cache:
-                st.info(f"SCADA Lookups: {scada_found_count} found, {scada_not_found_count} not found")
-            
-            # Load output data for display
             try:
                 df_output = pd.read_excel(output_path, engine='openpyxl')
-                
-                # Create dynamic table title based on station and date range
-                title_parts = ["calculation sheet for BD and non compliance of", station_name]
-                
-                # Extract date range from report title or use current dates
-                report_title = st.session_state.get('report_title', "⚡ REPORT")
-                if "FROM" in report_title and "TO" in report_title:
-                    # Extract date part (e.g., "01-Jan-2026 TO 31-Jan-2026")
-                    date_part = report_title.split("FROM")[1].strip() if "FROM" in report_title else ""
-                    # Extract month/year for shorter format (e.g., "Jan 26")
-                    try:
-                        if "TO" in date_part:
-                            from_date_str = date_part.split("TO")[0].strip()
-                            to_date_str = date_part.split("TO")[1].strip()
-                            # Parse and format as "Jan 26" if same month/year
-                            try:
-                                from_dt = datetime.strptime(from_date_str, "%d-%b-%Y")
-                                to_dt = datetime.strptime(to_date_str, "%d-%b-%Y")
-                                if from_dt.year == to_dt.year and from_dt.month == to_dt.month:
-                                    date_suffix = f"for {from_dt.strftime('%b %y')}"
-                                else:
-                                    date_suffix = f"for {from_dt.strftime('%b %y')} to {to_dt.strftime('%b %y')}"
-                            except:
-                                date_suffix = f"for {date_part}"
-                        else:
-                            try:
-                                from_dt = datetime.strptime(date_part, "%d-%b-%Y")
-                                date_suffix = f"for {from_dt.strftime('%b %y')}"
-                            except:
-                                date_suffix = f"for {date_part}"
-                        title_parts.append(date_suffix)
-                    except:
-                        pass
-                elif "FROM" in report_title:
-                    date_part = report_title.split("FROM")[1].strip()
-                    try:
-                        from_dt = datetime.strptime(date_part, "%d-%b-%Y")
-                        title_parts.append(f"for {from_dt.strftime('%b %y')}")
-                    except:
-                        title_parts.append(f"for {date_part}")
-                
-                table_title = " ".join(title_parts)
-                
-                st.divider()
-                st.header(f"📊 {table_title}")
-                
-                # Search and filter controls
-                col_search1, col_search2 = st.columns([2, 1])
-                with col_search1:
-                    search_term = st.text_input(
-                        "🔍 Search",
-                        value="",
-                        placeholder="Search in all columns...",
-                        help="Filter rows by searching across all columns"
-                    )
-                with col_search2:
-                    rows_per_page = st.selectbox(
-                        "Rows per page",
-                        options=[10, 25, 50, 100, 500],
-                        index=1,  # Default to 25
-                        help="Number of rows to display per page"
-                    )
-                
-                # Apply search filter
-                if search_term:
-                    mask = df_output.astype(str).apply(
-                        lambda x: x.str.contains(search_term, case=False, na=False)
-                    ).any(axis=1)
-                    df_filtered = df_output[mask].copy()
-                else:
-                    df_filtered = df_output.copy()
-                
-                # Pagination
-                total_rows = len(df_filtered)
-                total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
-                
-                if total_pages > 1:
-                    page_num = st.number_input(
-                        f"Page (1-{total_pages})",
-                        min_value=1,
-                        max_value=total_pages,
-                        value=1,
-                        step=1
-                    )
-                    start_idx = (page_num - 1) * rows_per_page
-                    end_idx = start_idx + rows_per_page
-                    df_display = df_filtered.iloc[start_idx:end_idx].copy()
-                    st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
-                else:
-                    df_display = df_filtered.copy()
-                    st.caption(f"Showing all {total_rows} rows")
-                
-                # Display table with sorting
-                if AGGrid_AVAILABLE:
-                    # Use AgGrid for advanced features
-                    gb = GridOptionsBuilder.from_dataframe(df_display)
-                    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=rows_per_page)
-                    gb.configure_side_bar()
-                    gb.configure_default_column(
-                        sortable=True,
-                        filterable=True,
-                        resizable=True,
-                        editable=False
-                    )
-                    gb.configure_selection('single')
-                    gridOptions = gb.build()
-                    
-                    AgGrid(
-                        df_display,
-                        gridOptions=gridOptions,
-                        height=400,
-                        width='100%',
-                        theme='streamlit',
-                        update_mode=GridUpdateMode.NO_UPDATE,
-                        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-                        allow_unsafe_jscode=True
-                    )
-                else:
-                    # Use standard Streamlit dataframe with sorting
-                    st.dataframe(
-                        df_display,
-                        use_container_width=True,
-                        height=400,
-                        hide_index=True
-                    )
-                    st.caption("💡 Tip: Install streamlit-aggrid for advanced filtering and sorting: pip install streamlit-aggrid")
-                
+                st.session_state[output_data_key] = df_output
+                st.session_state[f"{output_data_key}_path"] = str(output_path)
             except Exception as e:
-                st.warning(f"Could not display preview: {e}")
+                st.error(f"Could not load output data: {e}")
+                df_output = None
             
-            # Download button
-            st.divider()
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="📥 Download Output File",
-                    data=f.read(),
-                    file_name=output_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+            # Store reference and stats for display outside this block
+            if df_output is not None and not df_output.empty:
+                st.session_state['display_output_data_key'] = output_data_key
+                st.session_state['display_station_name'] = station_name
+                # Store stats for persistent display
+                st.session_state['display_stats'] = {
+                    'total_rows': len(matches),
+                    'total_slots': total_slots,
+                    'output_rows': last_row - 1,
+                    'dc_found': dc_found_count if dc_wb else None,
+                    'dc_not_found': dc_not_found_count if dc_wb else None,
+                    'scada_found': scada_found_count if scada_cache else None,
+                    'scada_not_found': scada_not_found_count if scada_cache else None,
+                }
     
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
         if verbose:
             import traceback
             st.code(traceback.format_exc())
+
+# Display output data if available (persists across reruns)
+# Download button - always show if output file exists (before data display)
+if 'last_output_file_data' in st.session_state:
+    st.divider()
+    st.download_button(
+        label="📥 Download Output File",
+        data=st.session_state['last_output_file_data'],
+        file_name=st.session_state.get('last_output_filename', 'output.xlsx'),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="download_button_top"
+    )
+elif 'last_output_path' in st.session_state:
+    output_path = Path(st.session_state['last_output_path'])
+    if output_path.exists():
+        st.divider()
+        with open(output_path, "rb") as f:
+            st.download_button(
+                label="📥 Download Output File",
+                data=f.read(),
+                file_name=st.session_state.get('last_output_filename', 'output.xlsx'),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_button_top"
+            )
+
+if 'display_output_data_key' in st.session_state:
+    output_data_key = st.session_state['display_output_data_key']
+    station_name = st.session_state.get('display_station_name', '')
+    
+    if output_data_key in st.session_state:
+        df_output = st.session_state[output_data_key]
+        
+        # Display stats/metrics if available
+        if 'display_stats' in st.session_state:
+            stats = st.session_state['display_stats']
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Rows", stats.get('total_rows', 0))
+            with col2:
+                st.metric("Total Slots", stats.get('total_slots', 0))
+            with col3:
+                st.metric("Output Rows", stats.get('output_rows', 0))
+            
+            if stats.get('dc_found') is not None:
+                st.info(f"DC Lookups: {stats['dc_found']} found, {stats['dc_not_found']} not found")
+            if stats.get('scada_found') is not None:
+                st.info(f"SCADA Lookups: {stats['scada_found']} found, {stats['scada_not_found']} not found")
+        
+        if df_output is not None and not df_output.empty:
+            # Create dynamic table title based on station and date range
+            title_parts = ["calculation sheet for BD and non compliance of", station_name]
+            
+            # Extract date range from report title or use current dates
+            report_title = st.session_state.get('report_title', "⚡ REPORT")
+            if "FROM" in report_title and "TO" in report_title:
+                # Extract date part (e.g., "01-Jan-2026 TO 31-Jan-2026")
+                date_part = report_title.split("FROM")[1].strip() if "FROM" in report_title else ""
+                # Extract month/year for shorter format (e.g., "Jan 26")
+                try:
+                    if "TO" in date_part:
+                        from_date_str = date_part.split("TO")[0].strip()
+                        to_date_str = date_part.split("TO")[1].strip()
+                        # Parse and format as "Jan 26" if same month/year
+                        try:
+                            from_dt = datetime.strptime(from_date_str, "%d-%b-%Y")
+                            to_dt = datetime.strptime(to_date_str, "%d-%b-%Y")
+                            if from_dt.year == to_dt.year and from_dt.month == to_dt.month:
+                                date_suffix = f"for {from_dt.strftime('%b %y')}"
+                            else:
+                                date_suffix = f"for {from_dt.strftime('%b %y')} to {to_dt.strftime('%b %y')}"
+                        except:
+                            date_suffix = f"for {date_part}"
+                    else:
+                        try:
+                            from_dt = datetime.strptime(date_part, "%d-%b-%Y")
+                            date_suffix = f"for {from_dt.strftime('%b %y')}"
+                        except:
+                            date_suffix = f"for {date_part}"
+                    title_parts.append(date_suffix)
+                except:
+                    pass
+            elif "FROM" in report_title:
+                date_part = report_title.split("FROM")[1].strip()
+                try:
+                    from_dt = datetime.strptime(date_part, "%d-%b-%Y")
+                    title_parts.append(f"for {from_dt.strftime('%b %y')}")
+                except:
+                    title_parts.append(f"for {date_part}")
+            
+            table_title = " ".join(title_parts)
+            
+            st.divider()
+            st.header(f"📊 {table_title}")
+            
+            # Search and filter controls
+            col_search1, col_search2 = st.columns([2, 1])
+            with col_search1:
+                search_key = f"{output_data_key}_search"
+                # Get current search value from session_state, default to empty string
+                current_search = st.session_state.get(search_key, "")
+                search_term = st.text_input(
+                    "🔍 Search",
+                    value=current_search,
+                    placeholder="Search in all columns...",
+                    help="Filter rows by searching across all columns",
+                    key=search_key
+                )
+            with col_search2:
+                rows_options = [10, 25, 50, 100, 500]
+                rows_key = f"{output_data_key}_rows_per_page"
+                default_rows = st.session_state.get(rows_key, 25)
+                default_idx = rows_options.index(default_rows) if default_rows in rows_options else 1
+                rows_per_page = st.selectbox(
+                    "Rows per page",
+                    options=rows_options,
+                    index=default_idx,
+                    help="Number of rows to display per page",
+                    key=rows_key
+                )
+            
+            # Apply search filter
+            if search_term:
+                mask = df_output.astype(str).apply(
+                    lambda x: x.str.contains(search_term, case=False, na=False)
+                ).any(axis=1)
+                df_filtered = df_output[mask].copy()
+            else:
+                df_filtered = df_output.copy()
+            
+            # Pagination
+            total_rows = len(df_filtered)
+            total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
+            
+            page_key = f"{output_data_key}_page"
+            current_page = st.session_state.get(page_key, 1)
+            # Reset to page 1 if current page exceeds total pages (before widget creation)
+            if current_page > total_pages:
+                current_page = 1
+            
+            if total_pages > 1:
+                page_num = st.number_input(
+                    f"Page (1-{total_pages})",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=current_page,
+                    step=1,
+                    key=page_key
+                )
+                start_idx = (page_num - 1) * rows_per_page
+                end_idx = start_idx + rows_per_page
+                df_display = df_filtered.iloc[start_idx:end_idx].copy()
+                st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
+            else:
+                df_display = df_filtered.copy()
+                st.caption(f"Showing all {total_rows} rows")
+            
+            # Display table with sorting
+            if AGGrid_AVAILABLE:
+                # Use AgGrid for advanced features
+                gb = GridOptionsBuilder.from_dataframe(df_display)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=rows_per_page)
+                gb.configure_side_bar()
+                gb.configure_default_column(
+                    sortable=True,
+                    filterable=True,
+                    resizable=True,
+                    editable=False
+                )
+                gb.configure_selection('single')
+                gridOptions = gb.build()
+                
+                AgGrid(
+                    df_display,
+                    gridOptions=gridOptions,
+                    height=400,
+                    width='100%',
+                    theme='streamlit',
+                    update_mode=GridUpdateMode.NO_UPDATE,
+                    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+                    allow_unsafe_jscode=True
+                )
+            else:
+                # Use standard Streamlit dataframe with sorting
+                st.dataframe(
+                    df_display,
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True
+                )
+                st.caption("💡 Tip: Install streamlit-aggrid for advanced filtering and sorting: pip install streamlit-aggrid")
+            
+            # Download button - also show below table
+            st.divider()
+            # Use file data from session_state if available, otherwise try to read from path
+            if 'last_output_file_data' in st.session_state:
+                # Use stored file data (persists even if temp file is deleted)
+                file_data = st.session_state['last_output_file_data']
+                download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
+                st.download_button(
+                    label="📥 Download Output File",
+                    data=file_data,
+                    file_name=download_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="download_button_bottom"
+                )
+            elif 'last_output_path' in st.session_state:
+                # Fallback: try to read from file path
+                output_path = Path(st.session_state['last_output_path'])
+                if output_path.exists():
+                    try:
+                        with open(output_path, "rb") as f:
+                            file_data = f.read()
+                        download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
+                        st.download_button(
+                            label="📥 Download Output File",
+                            data=file_data,
+                            file_name=download_filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="download_button_bottom"
+                        )
+                    except Exception as e:
+                        st.error(f"Error reading file: {e}")
+                else:
+                    st.warning("Output file not found. Please regenerate the report.")
