@@ -60,14 +60,16 @@ except ImportError as e:
 
 # Page config
 st.set_page_config(
-    page_title="Find Station Rows",
+    page_title="Report",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("⚡ Find Station Rows Tool")
-st.markdown("Extract and process time intervals for electrical station data")
+# Title will be updated after processing with date range
+if 'report_title' not in st.session_state:
+    st.session_state.report_title = "⚡ REPORT"
+    st.session_state.report_subtitle = "Generate electrical station data reports with time intervals"
 
 # Sidebar for inputs
 with st.sidebar:
@@ -103,8 +105,13 @@ with st.sidebar:
         if 'station_names_cache' not in st.session_state:
             st.session_state.station_names_cache = {}
         
-        if file_key not in st.session_state.station_names_cache:
-            with st.spinner("Extracting station names from file..."):
+        # Always extract dates for title, even if station names are cached
+        date_cache_key = f"{instructions_file.name}_{sheet_name}_dates"
+        if 'date_range_cache' not in st.session_state:
+            st.session_state.date_range_cache = {}
+        
+        if date_cache_key not in st.session_state.date_range_cache or file_key not in st.session_state.station_names_cache:
+            with st.spinner("Extracting station names and dates from file..."):
                 tmp_path = None
                 try:
                     # Reset file pointer
@@ -133,28 +140,88 @@ with st.sidebar:
                     # Find column
                     col_idx_temp, header_row_temp = find_column_by_name(ws_temp, column_name, max_header_rows=10)
                     
+                    # Find date column
+                    date_col_temp = None
+                    for col_idx_header in range(1, min(ws_temp.max_column + 1, 50)):
+                        header_cell = ws_temp.cell(row=header_row_temp, column=col_idx_header)
+                        if header_cell.value:
+                            header_val = str(header_cell.value).strip().lower()
+                            if "date" in header_val:
+                                date_col_temp = col_idx_header
+                                break
+                    
                     if col_idx_temp:
                         # Extract unique station names
                         unique_stations = set()
                         data_start = (header_row_temp or 1) + 1
                         max_rows_to_check = min(ws_temp.max_row + 1, data_start + 10000)  # Limit to 10k rows
                         
+                        # Extract dates for title
+                        dates_found = []
                         for row_num in range(data_start, max_rows_to_check):
                             cell = ws_temp.cell(row=row_num, column=col_idx_temp)
                             if cell.value:
                                 station_val = str(cell.value).strip()
                                 if station_val:
                                     unique_stations.add(station_val)
+                            
+                            # Extract date if date column found
+                            if date_col_temp:
+                                date_cell = ws_temp.cell(row=row_num, column=date_col_temp)
+                                if date_cell.value:
+                                    date_val = format_value(date_cell.value)
+                                    if date_val:
+                                        dates_found.append(date_val)
                         
                         station_names = sorted(list(unique_stations))
                         st.session_state.station_names_cache[file_key] = station_names
+                        
+                        # Extract and update date range for title
+                        if dates_found:
+                            parsed_dates = []
+                            for d in dates_found:
+                                try:
+                                    for fmt in ["%d-%b-%Y", "%d-%b-%y", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"]:
+                                        try:
+                                            parsed_dates.append((datetime.strptime(d, fmt), d))
+                                            break
+                                        except ValueError:
+                                            continue
+                                except:
+                                    pass
+                            
+                            if parsed_dates:
+                                parsed_dates.sort(key=lambda x: x[0])
+                                report_from_date = parsed_dates[0][1]
+                                report_to_date = parsed_dates[-1][1]
+                                if report_from_date == report_to_date:
+                                    title_str = f"⚡ REPORT FROM {report_from_date}"
+                                else:
+                                    title_str = f"⚡ REPORT FROM {report_from_date} TO {report_to_date}"
+                                st.session_state.report_title = title_str
+                                st.session_state.date_range_cache[date_cache_key] = title_str
+                            else:
+                                dates_sorted = sorted(set(dates_found))
+                                if len(dates_sorted) == 1:
+                                    title_str = f"⚡ REPORT FROM {dates_sorted[0]}"
+                                elif len(dates_sorted) > 1:
+                                    title_str = f"⚡ REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
+                                else:
+                                    title_str = "⚡ REPORT"
+                                st.session_state.report_title = title_str
+                                st.session_state.date_range_cache[date_cache_key] = title_str
+                        else:
+                            st.session_state.report_title = "⚡ REPORT"
+                            st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
                     else:
                         st.session_state.station_names_cache[file_key] = []
+                        st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
                     
                     wb_temp.close()
                 except Exception as e:
                     st.warning(f"Could not extract station names: {e}")
                     st.session_state.station_names_cache[file_key] = []
+                    st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
                 finally:
                     if tmp_path and os.path.exists(tmp_path):
                         try:
@@ -163,6 +230,9 @@ with st.sidebar:
                             pass
         else:
             station_names = st.session_state.station_names_cache[file_key]
+            # Restore title from cache
+            if date_cache_key in st.session_state.date_range_cache:
+                st.session_state.report_title = st.session_state.date_range_cache[date_cache_key]
         
         # Show dropdown (always selectbox, never editable text input)
         if station_names:
@@ -363,6 +433,11 @@ with st.sidebar:
             help="Enable verbose debug output"
         )
 
+# Display title after sidebar processing (so it can be updated by file upload)
+title_to_show = st.session_state.get('report_title', "⚡ REPORT")
+st.title(title_to_show)
+st.markdown(st.session_state.get('report_subtitle', "Generate electrical station data reports with time intervals"))
+
 # Main content area
 if instructions_file is None:
     st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
@@ -395,8 +470,8 @@ if not bd_sheet or bd_sheet.strip() == "":
     st.error("❌ BD Sheet Name is required. Please enter the BD sheet name.")
     st.stop()
 
-# Process button
-if st.button("🚀 Process", type="primary", use_container_width=True):
+# Generate button
+if st.button("🚀 Generate", type="primary", use_container_width=True):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -486,7 +561,7 @@ if st.button("🚀 Process", type="primary", use_container_width=True):
             
             st.success(f"✅ Found {len(matches)} matching row(s)")
             
-            # Find time columns
+            # Find time columns and date column
             from_time_col = None
             to_time_col = None
             date_col = None
@@ -600,6 +675,7 @@ if st.button("🚀 Process", type="primary", use_container_width=True):
                                 current_date = date_str
                                 previous_date_with_data = date_str
                                 date_start_row = row_idx
+                                # Track date for report title
                             
                             for slot_idx, (slot_from, slot_to) in enumerate(slots):
                                 if slot_idx == 0 and date_str and date_start_row == row_idx:
@@ -698,6 +774,8 @@ if st.button("🚀 Process", type="primary", use_container_width=True):
             if scada_cache:
                 scada_cache.close_all()
             
+            # Title already updated from instructions file date range above
+            
             # Display summary
             st.success("✅ Output file generated successfully!")
             
@@ -718,8 +796,50 @@ if st.button("🚀 Process", type="primary", use_container_width=True):
             try:
                 df_output = pd.read_excel(output_path, engine='openpyxl')
                 
+                # Create dynamic table title based on station and date range
+                title_parts = ["calculation sheet for BD and non compliance of", station_name]
+                
+                # Extract date range from report title or use current dates
+                report_title = st.session_state.get('report_title', "⚡ REPORT")
+                if "FROM" in report_title and "TO" in report_title:
+                    # Extract date part (e.g., "01-Jan-2026 TO 31-Jan-2026")
+                    date_part = report_title.split("FROM")[1].strip() if "FROM" in report_title else ""
+                    # Extract month/year for shorter format (e.g., "Jan 26")
+                    try:
+                        if "TO" in date_part:
+                            from_date_str = date_part.split("TO")[0].strip()
+                            to_date_str = date_part.split("TO")[1].strip()
+                            # Parse and format as "Jan 26" if same month/year
+                            try:
+                                from_dt = datetime.strptime(from_date_str, "%d-%b-%Y")
+                                to_dt = datetime.strptime(to_date_str, "%d-%b-%Y")
+                                if from_dt.year == to_dt.year and from_dt.month == to_dt.month:
+                                    date_suffix = f"for {from_dt.strftime('%b %y')}"
+                                else:
+                                    date_suffix = f"for {from_dt.strftime('%b %y')} to {to_dt.strftime('%b %y')}"
+                            except:
+                                date_suffix = f"for {date_part}"
+                        else:
+                            try:
+                                from_dt = datetime.strptime(date_part, "%d-%b-%Y")
+                                date_suffix = f"for {from_dt.strftime('%b %y')}"
+                            except:
+                                date_suffix = f"for {date_part}"
+                        title_parts.append(date_suffix)
+                    except:
+                        pass
+                elif "FROM" in report_title:
+                    date_part = report_title.split("FROM")[1].strip()
+                    try:
+                        from_dt = datetime.strptime(date_part, "%d-%b-%Y")
+                        title_parts.append(f"for {from_dt.strftime('%b %y')}")
+                    except:
+                        title_parts.append(f"for {date_part}")
+                
+                table_title = " ".join(title_parts)
+                
                 st.divider()
-                st.header("📊 Output Data Preview")
+                st.header(f"📊 {table_title}")
                 
                 # Search and filter controls
                 col_search1, col_search2 = st.columns([2, 1])
