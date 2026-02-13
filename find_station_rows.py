@@ -19,7 +19,7 @@ from datetime import datetime, date, time
 
 try:
     import openpyxl
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 except ImportError:
     print("Install openpyxl: pip install openpyxl", file=sys.stderr)
@@ -979,8 +979,6 @@ def main():
         top=Side(style='thin'),
         bottom=Side(style='thin')
     )
-    gray_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')  # Light gray
-
     # No padding: content starts at A1
     pad = 0
     header_row, start_col, start_data_row = 1 + pad, 1 + pad, 2 + pad
@@ -1113,24 +1111,8 @@ def main():
                         
                         row_idx += 1
 
-    # Gray background for entire sheet except content (header + data in B2:G)
     last_row = row_idx - 1
-    last_content_col = start_col + 5  # G
-    right_pad_col = last_content_col + 1  # H
-    # Cover full sheet (10K rows × 50 cols) - only non-content cells filled
-    max_fill_row, max_fill_col = 10000, 50
-    # Fill only non-content cells (avoid iterating content area)
-    for r in range(1, header_row):
-        for c in range(1, max_fill_col + 1):
-            output_sheet.cell(row=r, column=c).fill = gray_fill
-    for r in range(header_row, last_row + 1):
-        for c in range(1, start_col):
-            output_sheet.cell(row=r, column=c).fill = gray_fill
-        for c in range(last_content_col + 1, max_fill_col + 1):
-            output_sheet.cell(row=r, column=c).fill = gray_fill
-    for r in range(last_row + 1, max_fill_row + 1):
-        for c in range(1, max_fill_col + 1):
-            output_sheet.cell(row=r, column=c).fill = gray_fill
+    last_content_col = start_col + 5
 
     # Freeze header row so it stays visible on scroll
     output_sheet.freeze_panes = output_sheet.cell(row=start_data_row, column=start_col).coordinate
