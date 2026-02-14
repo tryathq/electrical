@@ -703,12 +703,14 @@ if _status in ("running", "done", "error"):
             if st.button("🔄 Refresh status", key="bg_job_refresh"):
                 st.rerun()
     elif _status == "done":
-        st.success(f"✅ **Report ready.** It has been saved to **Reports**. Go to **Reports** in the sidebar to view and download.")
-        if st.button("View in Reports", key="bg_job_view"):
-            st.session_state["view_mode"] = "reports"
-            url_reports_list()
-            background_write_job({})  # clear job so banner doesn't show again
-            st.rerun()
+        # Only show "Report ready" banner on Home page, not when viewing Reports page
+        if not _viewing_saved_report and not _on_reports_list:
+            st.success(f"✅ **Report ready.** It has been saved to **Reports**. Go to **Reports** in the sidebar to view and download.")
+            if st.button("View in Reports", key="bg_job_view"):
+                st.session_state["view_mode"] = "reports"
+                url_reports_list()
+                background_write_job({})  # clear job so banner doesn't show again
+                st.rerun()
     elif _status == "error":
         _err = _bg_job.get("error_message", "Unknown error")
         st.error(f"❌ **Report generation failed:** {_err}")
