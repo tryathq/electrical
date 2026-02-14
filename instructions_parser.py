@@ -16,7 +16,7 @@ MAX_HEADER_COLS = 50
 def _parse_dates_to_title(dates_found: list[str]) -> str:
     """Build report title string from list of date strings."""
     if not dates_found:
-        return "⚡ REPORT"
+        return "⚡ GENERATE REPORT"
     parsed = []
     for d in dates_found:
         for fmt in DATE_FORMATS:
@@ -28,13 +28,13 @@ def _parse_dates_to_title(dates_found: list[str]) -> str:
     if parsed:
         parsed.sort(key=lambda x: x[0])
         from_d, to_d = parsed[0][1], parsed[-1][1]
-        return f"⚡ REPORT FROM {from_d} TO {to_d}" if from_d != to_d else f"⚡ REPORT FROM {from_d}"
+        return f"⚡ GENERATE REPORT FROM {from_d} TO {to_d}" if from_d != to_d else f"⚡ GENERATE REPORT FROM {from_d}"
     dates_sorted = sorted(set(dates_found))
     if len(dates_sorted) == 1:
-        return f"⚡ REPORT FROM {dates_sorted[0]}"
+        return f"⚡ GENERATE REPORT FROM {dates_sorted[0]}"
     if len(dates_sorted) > 1:
-        return f"⚡ REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
-    return "⚡ REPORT"
+        return f"⚡ GENERATE REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
+    return "⚡ GENERATE REPORT"
 
 
 def extract_stations_and_title(
@@ -47,7 +47,7 @@ def extract_stations_and_title(
     Uses active sheet if sheet_name is empty.
     """
     station_names: list[str] = []
-    report_title = "⚡ REPORT"
+    report_title = "⚡ GENERATE REPORT"
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     try:
         if sheet_name:

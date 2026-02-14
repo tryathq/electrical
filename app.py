@@ -64,8 +64,8 @@ st.set_page_config(
 
 # Title will be updated after processing with date range
 if 'report_title' not in st.session_state:
-    st.session_state.report_title = "⚡ REPORT"
-    st.session_state.report_subtitle = "Generate electrical station data reports with time intervals"
+    st.session_state.report_title = "⚡ GENERATE REPORT"
+    st.session_state.report_subtitle = "Generate calculation sheet for BD and non compliance"
 
 # Sync Reports view from URL (skip if user just navigated away so we don't re-apply stale URL)
 if not st.session_state.pop("_url_go_main", None) and getattr(st, "query_params", None):
@@ -159,8 +159,8 @@ with st.sidebar:
                     except Exception as e:
                         st.warning(f"Could not extract station names: {e}")
                         st.session_state.station_names_cache[file_key] = []
-                        st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                        st.session_state.report_title = "⚡ REPORT"
+                        st.session_state.date_range_cache[date_cache_key] = "⚡ GENERATE REPORT"
+                        st.session_state.report_title = "⚡ GENERATE REPORT"
                     finally:
                         if tmp_path and tmp_path.exists():
                             try:
@@ -424,11 +424,11 @@ st.markdown("""
 # Display title and subtitle per page (Reports list vs viewing a report vs Home)
 _on_reports_list = st.session_state.get("view_mode") == "reports" and not st.session_state.get("reports_view_filename")
 if _on_reports_list:
-    title_to_show = "📂 Reports"
+    title_to_show = "📂 REPORTS"
     subtitle_to_show = "Choose a report to view."
 else:
-    title_to_show = st.session_state.get('report_title', "⚡ REPORT")
-    subtitle_to_show = st.session_state.get('report_subtitle', "Generate electrical station data reports with time intervals")
+    title_to_show = st.session_state.get('report_title', "⚡ GENERATE REPORT")
+    subtitle_to_show = st.session_state.get('report_subtitle', "Generate calculation sheet for BD and non compliance")
 st.title(title_to_show)
 st.markdown(subtitle_to_show)
 
@@ -488,11 +488,11 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
                 "output_rows": _reports_view_entry.get("row_count", 0),
             }
             if date_f and date_t:
-                st.session_state["report_title"] = f"⚡ REPORT FROM {date_f} TO {date_t}"
+                st.session_state["report_title"] = f"⚡ GENERATE REPORT FROM {date_f} TO {date_t}"
             elif date_f:
-                st.session_state["report_title"] = f"⚡ REPORT FROM {date_f}"
+                st.session_state["report_title"] = f"⚡ GENERATE REPORT FROM {date_f}"
             else:
-                st.session_state["report_title"] = "⚡ REPORT"
+                st.session_state["report_title"] = "⚡ GENERATE REPORT"
             st.session_state["reports_view_active"] = _reports_view_filename
         except Exception:
             st.session_state["reports_view_active"] = None
@@ -550,7 +550,7 @@ if 'display_output_data_key' in st.session_state:
             title_parts = ["Calculation sheet for BD and non compliance of", station_name_display]
             
             # Extract date range from report title or use current dates
-            report_title = st.session_state.get('report_title', "⚡ REPORT")
+            report_title = st.session_state.get('report_title', "⚡ GENERATE REPORT")
             if "FROM" in report_title and "TO" in report_title:
                 # Extract date part (e.g., "01-Jan-2026 TO 31-Jan-2026")
                 date_part = report_title.split("FROM")[1].strip() if "FROM" in report_title else ""
@@ -1146,7 +1146,7 @@ if run_generate:
             # Persist "latest" so "Back to latest" can restore
             st.session_state['last_display_station_name'] = station_name
             st.session_state['last_display_stats'] = display_stats
-            st.session_state['last_report_title'] = st.session_state.get('report_title', '⚡ REPORT')
+            st.session_state['last_report_title'] = st.session_state.get('report_title', '⚡ GENERATE REPORT')
             # Rerun so display block refreshes without processing caption (processing_in_progress was cleared)
             st.rerun()
     
