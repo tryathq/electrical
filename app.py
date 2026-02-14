@@ -421,25 +421,10 @@ with st.sidebar:
         if bd_folder_path and bd_sheet:
             st.caption("⚠️ Could not extract columns. Check BD folder path and sheet name.")
     
-    # Advanced options
-    with st.expander("🔧 Advanced Options"):
-        header_rows = st.number_input(
-            "Max Header Rows",
-            min_value=1,
-            max_value=50,
-            value=10,
-            help="Maximum rows to scan for column headers"
-        )
-        data_only = st.checkbox(
-            "Data Only Mode",
-            value=False,
-            help="Read with data_only=True (evaluated values, not formulas)"
-        )
-        verbose = st.checkbox(
-            "Verbose Output",
-            value=False,
-            help="Enable verbose debug output"
-        )
+    # Defaults (advanced options removed for now)
+    header_rows = 10
+    data_only = False
+    verbose = False
 
 # Display title after sidebar processing (so it can be updated by file upload)
 title_to_show = st.session_state.get('report_title', "⚡ REPORT")
