@@ -460,12 +460,12 @@ if not station_name or station_name.strip() == "":
 
 # Check if DC file is provided (mandatory)
 if dc_file is None:
-    st.error("❌ DC File is required. Please upload a DC Excel file.")
+    st.info("👈 Please upload a DC Excel file in the sidebar to get started.")
     st.stop()
 
 # Check if BD folder path is provided (mandatory)
 if not bd_folder_path or bd_folder_path.strip() == "":
-    st.error("❌ BD Folder Path is required. Please enter the path to the BD folder.")
+    st.info("👈 Please enter the path to the BD folder in the sidebar.")
     st.stop()
 
 # Check if SCADA column is provided (mandatory)
