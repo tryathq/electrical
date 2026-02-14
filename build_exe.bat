@@ -17,8 +17,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set OUT=dist\ElectricalReport
-set ZIP=ElectricalReport_Ready.zip
+set OUT=dist\BackDownCalculator
+set ZIP=BackDownCalculator.zip
 
 echo.
 echo Creating zip for customer: %ZIP%

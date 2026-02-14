@@ -4,7 +4,7 @@ REM Customer only: unzip and double-click START_APP.bat (no Python install neede
 
 setlocal
 cd /d "%~dp0"
-set OUT=BackDownCalculator_Ready
+set OUT=BackDownCalculator
 set VENV=%OUT%\venv
 
 echo Building customer package in: %OUT%
