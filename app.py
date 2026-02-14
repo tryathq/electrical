@@ -56,7 +56,7 @@ except ImportError as e:
 
 # Page config
 st.set_page_config(
-    page_title="Report",
+    page_title="Back Down Calculator",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -64,7 +64,7 @@ st.set_page_config(
 
 # Title will be updated after processing with date range
 if 'report_title' not in st.session_state:
-    st.session_state.report_title = "⚡ GENERATE REPORT"
+    st.session_state.report_title = "Back Down Calculator"
     st.session_state.report_subtitle = "Generate calculation sheet for BD and non compliance"
 
 # Sync Reports view from URL (skip if user just navigated away so we don't re-apply stale URL)
@@ -159,8 +159,8 @@ with st.sidebar:
                     except Exception as e:
                         st.warning(f"Could not extract station names: {e}")
                         st.session_state.station_names_cache[file_key] = []
-                        st.session_state.date_range_cache[date_cache_key] = "⚡ GENERATE REPORT"
-                        st.session_state.report_title = "⚡ GENERATE REPORT"
+                        st.session_state.date_range_cache[date_cache_key] = "Back Down Calculator"
+                        st.session_state.report_title = "Back Down Calculator"
                     finally:
                         if tmp_path and tmp_path.exists():
                             try:
@@ -365,7 +365,7 @@ with st.sidebar:
         header_rows = 10
         data_only = False
         verbose = False
-        st.caption("**Reports** — select a report")
+        st.caption("**Back Down reports** — select a report")
         reports_list_sidebar = reports_load_index()
         if not reports_list_sidebar:
             st.info("No saved reports yet. Go to **Home** to generate one.")
@@ -423,11 +423,15 @@ st.markdown("""
 
 # Display title and subtitle per page (Reports list vs viewing a report vs Home)
 _on_reports_list = st.session_state.get("view_mode") == "reports" and not st.session_state.get("reports_view_filename")
+_viewing_saved_report_header = bool(st.session_state.get("reports_view_filename") and st.session_state.get("reports_view_entry"))
 if _on_reports_list:
-    title_to_show = "📂 REPORTS"
+    title_to_show = "Back Down reports"
     subtitle_to_show = "Choose a report to view."
+elif _viewing_saved_report_header:
+    title_to_show = st.session_state.get('report_title', "Back Down Calculator")
+    subtitle_to_show = "Generated calculation sheet for BD and non compliance"
 else:
-    title_to_show = st.session_state.get('report_title', "⚡ GENERATE REPORT")
+    title_to_show = st.session_state.get('report_title', "Back Down Calculator")
     subtitle_to_show = st.session_state.get('report_subtitle', "Generate calculation sheet for BD and non compliance")
 st.title(title_to_show)
 st.markdown(subtitle_to_show)
@@ -488,11 +492,11 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
                 "output_rows": _reports_view_entry.get("row_count", 0),
             }
             if date_f and date_t:
-                st.session_state["report_title"] = f"⚡ GENERATE REPORT FROM {date_f} TO {date_t}"
+                st.session_state["report_title"] = f"Back Down Calculator — {date_f} to {date_t}"
             elif date_f:
-                st.session_state["report_title"] = f"⚡ GENERATE REPORT FROM {date_f}"
+                st.session_state["report_title"] = f"Back Down Calculator — {date_f}"
             else:
-                st.session_state["report_title"] = "⚡ GENERATE REPORT"
+                st.session_state["report_title"] = "Back Down Calculator"
             st.session_state["reports_view_active"] = _reports_view_filename
         except Exception:
             st.session_state["reports_view_active"] = None
@@ -549,17 +553,15 @@ if 'display_output_data_key' in st.session_state:
             # Create dynamic table title based on station and date range
             title_parts = ["Calculation sheet for BD and non compliance of", station_name_display]
             
-            # Extract date range from report title or use current dates
-            report_title = st.session_state.get('report_title', "⚡ GENERATE REPORT")
-            if "FROM" in report_title and "TO" in report_title:
-                # Extract date part (e.g., "01-Jan-2026 TO 31-Jan-2026")
-                date_part = report_title.split("FROM")[1].strip() if "FROM" in report_title else ""
-                # Extract month/year for shorter format (e.g., "Jan 26")
+            # Extract date range from report title or use current dates (format: "Back Down Calculator — 01-Jan-2026 to 31-Jan-2026")
+            report_title = st.session_state.get('report_title', "Back Down Calculator")
+            date_part = ""
+            if " — " in report_title:
+                date_part = report_title.split(" — ", 1)[1].strip()
+            if date_part:
                 try:
-                    if "TO" in date_part:
-                        from_date_str = date_part.split("TO")[0].strip()
-                        to_date_str = date_part.split("TO")[1].strip()
-                        # Parse and format as "Jan 26" if same month/year
+                    if " to " in date_part:
+                        from_date_str, to_date_str = date_part.split(" to ", 1)[0].strip(), date_part.split(" to ", 1)[1].strip()
                         try:
                             from_dt = datetime.strptime(from_date_str, "%d-%b-%Y")
                             to_dt = datetime.strptime(to_date_str, "%d-%b-%Y")
@@ -567,24 +569,17 @@ if 'display_output_data_key' in st.session_state:
                                 date_suffix = f"for {from_dt.strftime('%b %y')}"
                             else:
                                 date_suffix = f"for {from_dt.strftime('%b %y')} to {to_dt.strftime('%b %y')}"
-                        except:
+                        except Exception:
                             date_suffix = f"for {date_part}"
                     else:
                         try:
                             from_dt = datetime.strptime(date_part, "%d-%b-%Y")
                             date_suffix = f"for {from_dt.strftime('%b %y')}"
-                        except:
+                        except Exception:
                             date_suffix = f"for {date_part}"
                     title_parts.append(date_suffix)
-                except:
+                except Exception:
                     pass
-            elif "FROM" in report_title:
-                date_part = report_title.split("FROM")[1].strip()
-                try:
-                    from_dt = datetime.strptime(date_part, "%d-%b-%Y")
-                    title_parts.append(f"for {from_dt.strftime('%b %y')}")
-                except:
-                    title_parts.append(f"for {date_part}")
             
             table_title = " ".join(title_parts)
             
@@ -657,8 +652,7 @@ if 'display_output_data_key' in st.session_state:
                         except Exception:
                             pass
             
-            # Apply search filter and compute pagination
-            rows_per_page = st.session_state.get(rows_key, 25)
+            # Apply search filter
             if search_term:
                 mask = df_output.astype(str).apply(
                     lambda x: x.str.contains(search_term, case=False, na=False)
@@ -668,21 +662,11 @@ if 'display_output_data_key' in st.session_state:
                 df_filtered = df_output.copy()
             
             total_rows = len(df_filtered)
-            total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
-            current_page = st.session_state.get(page_key, 1)
-            if current_page > total_pages:
-                current_page = 1
-            page_num = current_page
             
-            start_idx = (page_num - 1) * rows_per_page
-            end_idx = start_idx + rows_per_page
-            df_display = df_filtered.iloc[start_idx:end_idx].copy()
-            
-            # Display table with sorting
             if AGGrid_AVAILABLE:
-                # Use AgGrid for advanced features
-                gb = GridOptionsBuilder.from_dataframe(df_display)
-                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=rows_per_page)
+                # Use AgGrid: pass full data; table has built-in pagination (no "Rows per page" or our page nav)
+                gb = GridOptionsBuilder.from_dataframe(df_filtered)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
                 gb.configure_side_bar()
                 gb.configure_default_column(
                     sortable=True,
@@ -694,9 +678,9 @@ if 'display_output_data_key' in st.session_state:
                 gridOptions = gb.build()
                 
                 AgGrid(
-                    df_display,
+                    df_filtered,
                     gridOptions=gridOptions,
-                    height=table_height(len(df_display)),
+                    height=table_height(min(len(df_filtered), 25)),
                     width='100%',
                     theme='streamlit',
                     update_mode=GridUpdateMode.NO_UPDATE,
@@ -704,55 +688,27 @@ if 'display_output_data_key' in st.session_state:
                     allow_unsafe_jscode=True
                 )
             else:
-                # Use standard Streamlit dataframe with sorting
+                # Fallback: manual pagination (no "Rows per page" selectbox)
+                rows_per_page = 25
+                total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
+                current_page = st.session_state.get(page_key, 1)
+                if current_page > total_pages:
+                    current_page = 1
+                page_num = current_page
+                start_idx = (page_num - 1) * rows_per_page
+                end_idx = start_idx + rows_per_page
+                df_display = df_filtered.iloc[start_idx:end_idx].copy()
+                
                 st.dataframe(
                     df_display,
                     width='stretch',
                     height=table_height(len(df_display)),
                     hide_index=True
                 )
-            
-            # Bottom row: caption left, Rows per page + Page nav right
-            col_caption, col_nav = st.columns([2, 1])
-            with col_caption:
                 if total_pages > 1:
-                    st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows} (Page {page_num}/{total_pages})")
+                    st.caption(f"Showing rows {start_idx + 1} to {min(end_idx, total_rows)} of {total_rows}")
                 else:
                     st.caption(f"Showing all {total_rows} rows")
-            with col_nav:
-                rows_options = [10, 25, 50, 100, 500]
-                default_rows = st.session_state.get(rows_key, 25)
-                default_idx = rows_options.index(default_rows) if default_rows in rows_options else 1
-                col_rows, col_prev, col_info, col_next = st.columns([1.2, 0.6, 0.8, 0.6])
-                with col_rows:
-                    st.selectbox(
-                        "Rows per page",
-                        options=rows_options,
-                        index=default_idx,
-                        help="Number of rows to display per page",
-                        key=rows_key,
-                        label_visibility="visible"
-                    )
-                if total_pages > 1:
-                    label_style = 'font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;'
-                    with col_prev:
-                        st.markdown(f'<div style="{label_style}">Page</div>', unsafe_allow_html=True)
-                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", width='stretch')
-                        if prev_clicked:
-                            st.session_state[page_key] = max(1, current_page - 1)
-                            st.rerun()
-                    with col_info:
-                        st.markdown(f'<div style="{label_style}">&nbsp;</div>', unsafe_allow_html=True)
-                        st.markdown(
-                            f"<div style='display: flex; align-items: center; justify-content: center; min-height: 38px; font-weight: 500; font-size: 14px;'>{current_page}/{total_pages}</div>",
-                            unsafe_allow_html=True
-                        )
-                    with col_next:
-                        st.markdown(f'<div style="{label_style}">&nbsp;</div>', unsafe_allow_html=True)
-                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", width='stretch')
-                        if next_clicked:
-                            st.session_state[page_key] = min(total_pages, current_page + 1)
-                            st.rerun()
 
 # Trigger continue processing on next run
 if st.session_state.get('processing_in_progress'):
@@ -1082,10 +1038,10 @@ if run_generate:
             reports_save_file(Path(output_path), output_filename)
             report_title = st.session_state.get('report_title', '')
             date_from = date_to = ""
-            if "FROM" in report_title:
-                part = report_title.split("FROM", 1)[1].strip()
-                if " TO " in part:
-                    date_from, date_to = (s.strip() for s in part.split(" TO ", 1))
+            if " — " in report_title:
+                part = report_title.split(" — ", 1)[1].strip()
+                if " to " in part:
+                    date_from, date_to = (s.strip() for s in part.split(" to ", 1))
                 else:
                     date_from = part
             reports_append_entry({
@@ -1146,7 +1102,7 @@ if run_generate:
             # Persist "latest" so "Back to latest" can restore
             st.session_state['last_display_station_name'] = station_name
             st.session_state['last_display_stats'] = display_stats
-            st.session_state['last_report_title'] = st.session_state.get('report_title', '⚡ GENERATE REPORT')
+            st.session_state['last_report_title'] = st.session_state.get('report_title', 'Back Down Calculator')
             # Rerun so display block refreshes without processing caption (processing_in_progress was cleared)
             st.rerun()
     
