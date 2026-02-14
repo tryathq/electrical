@@ -4,7 +4,7 @@
 
 set -e
 cd "$(dirname "$0")"
-OUT="BackDownCalculator_Ready"
+OUT="BackDownCalculator"
 VENV="$OUT/venv"
 
 echo "Building customer package in: $OUT"
@@ -34,5 +34,5 @@ chmod +x "$OUT/START_APP.sh"
 
 echo ""
 echo "Done. Folder: $OUT"
-echo "Next: zip it (e.g. zip -r BackDownCalculator_Ready.zip $OUT) and send to customer."
+echo "Next: zip it (e.g. zip -r BackDownCalculator.zip $OUT) and send to customer."
 echo "Customer: unzip, then run ./START_APP.sh. No other steps."

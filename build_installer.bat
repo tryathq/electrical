@@ -1,13 +1,13 @@
 @echo off
 REM Builds the Windows installer (setup.exe).
-REM 1. Run build_for_customer.bat first if you haven't (creates BackDownCalculator_Ready).
+REM 1. Run build_for_customer.bat first if you haven't (creates BackDownCalculator).
 REM 2. Install Inno Setup from https://jrsoftware.org/isdl.php (free).
 REM 3. Run this script. It will open the .iss in Inno Setup or compile if iscc is in PATH.
 
 cd /d "%~dp0"
 
-if not exist "BackDownCalculator_Ready" (
-    echo BackDownCalculator_Ready folder not found.
+if not exist "BackDownCalculator" (
+    echo BackDownCalculator folder not found.
     echo Please run build_for_customer.bat first, then run this again.
     pause
     exit /b 1

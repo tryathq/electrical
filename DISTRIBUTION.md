@@ -16,7 +16,7 @@ chmod +x build_for_customer.sh
 ./build_for_customer.sh
 ```
 
-This creates a folder **`BackDownCalculator_Ready`** with the app, a ready-made Python environment, and a launcher. Zip that folder (e.g. `BackDownCalculator_Ready.zip`) and send it to the customer.
+This creates a folder **`BackDownCalculator`** with the app, a ready-made Python environment, and a launcher. Zip that folder (e.g. `BackDownCalculator.zip`) and send it to the customer.
 
 ### What the customer does
 
@@ -39,7 +39,7 @@ For a familiar “Install” experience (Next → choose folder → Start Menu s
 
 ### What you do (on Windows)
 
-1. **Build the app package:** Double-click **`build_for_customer.bat`** (creates `BackDownCalculator_Ready`).
+1. **Build the app package:** Double-click **`build_for_customer.bat`** (creates `BackDownCalculator`).
 2. **Install Inno Setup** (free): https://jrsoftware.org/isdl.php — use default install path.
 3. **Build the installer:** Double-click **`build_installer.bat`**.  
    - If Inno Setup is installed, it will compile and create **`installer_output\BackDownCalculator_Setup.exe`**.  
