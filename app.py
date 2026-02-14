@@ -4,67 +4,26 @@ Streamlit Desktop App for Find Station Rows
 Converts the command-line tool into a user-friendly GUI
 """
 
-import streamlit as st
+import os
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from datetime import datetime
-import tempfile
-import os
-import json
-import shutil
+
 import pandas as pd
+import streamlit as st
 
-# Slots per batch for incremental table updates
-PROCESSING_BATCH_SIZE = 5
-
-# Reports persistence: folder and index path (on disk — persists after app close)
-REPORTS_DIR = Path(__file__).resolve().parent / "reports"
-REPORTS_INDEX_FILE = REPORTS_DIR / "reports_index.json"
-
-
-def _reports_ensure_dir():
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _reports_load_index():
-    """Load list of persisted reports from disk (newest first)."""
-    if not REPORTS_INDEX_FILE.exists():
-        return []
-    try:
-        with open(REPORTS_INDEX_FILE, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-        return sorted(entries, key=lambda e: e.get("run_at", ""), reverse=True)
-    except Exception:
-        return []
-
-
-def _reports_append_entry(entry):
-    """Append one report entry to the index and flush to disk so it persists after app close."""
-    _reports_ensure_dir()
-    entries = _reports_load_index()
-    entries.insert(0, entry)
-    with open(REPORTS_INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def _reports_save_file(src_path: Path, filename: str) -> Path:
-    """Copy report file to reports dir on disk; persists after app close."""
-    _reports_ensure_dir()
-    dest = REPORTS_DIR / filename
-    shutil.copy2(src_path, dest)
-    return dest
-
-# Table height: ~35px per row + 40px header, min 200, max 500 (fits most screens)
-def _table_height(row_count, min_h=200, max_h=500, row_px=35, header_px=40):
-    return min(max(min_h, header_px + row_count * row_px), max_h)
+from config import PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
+from excel_builder import build_report_workbook
+from instructions_parser import extract_stations_and_title
+from reports_store import append_entry as reports_append_entry
+from reports_store import load_index as reports_load_index
+from reports_store import save_file as reports_save_file
+from url_utils import url_main, url_report_file, url_reports_list
 
 try:
     import openpyxl
-    from openpyxl.styles import Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
 except ImportError:
     st.error("❌ Missing dependency: openpyxl. Please install with: pip install openpyxl")
     st.stop()
@@ -108,34 +67,12 @@ if 'report_title' not in st.session_state:
     st.session_state.report_title = "⚡ REPORT"
     st.session_state.report_subtitle = "Generate electrical station data reports with time intervals"
 
-def _url_reports_list():
-    """Set URL to reports list only (?view=reports)."""
-    if getattr(st, "query_params", None) is not None and hasattr(st.query_params, "from_dict"):
-        st.query_params.from_dict({"view": "reports"})
-
-
-def _url_report_file(filename):
-    """Set URL to single report (?view=report&file=...)."""
-    if getattr(st, "query_params", None) is not None and hasattr(st.query_params, "from_dict"):
-        st.query_params.from_dict({"view": "report", "file": filename})
-
-
-def _url_main():
-    """Set URL to main page (no view/file params)."""
-    if getattr(st, "query_params", None) is not None:
-        if hasattr(st.query_params, "clear"):
-            st.query_params.clear()
-        elif hasattr(st.query_params, "from_dict"):
-            st.query_params.from_dict({})
-
-
 # Sync Reports view from URL (skip if user just navigated away so we don't re-apply stale URL)
 if not st.session_state.pop("_url_go_main", None) and getattr(st, "query_params", None):
     qp = st.query_params
     if qp.get("view") == "report" and qp.get("file"):
-        # Direct link to a report: ?view=report&file=filename.xlsx
         report_file = qp.get("file")
-        for entry in _reports_load_index():
+        for entry in reports_load_index():
             if entry.get("filename") == report_file:
                 st.session_state["reports_view_filename"] = report_file
                 st.session_state["reports_view_entry"] = entry
@@ -144,11 +81,9 @@ if not st.session_state.pop("_url_go_main", None) and getattr(st, "query_params"
                 break
     elif qp.get("view") == "reports" and not st.session_state.get("reports_view_filename"):
         st.session_state["view_mode"] = "reports"
-# Normalize URL when on main page: clear any stale view/file
 if getattr(st, "query_params", None) and not st.session_state.get("view_mode") and not st.session_state.get("reports_view_filename"):
-    qp = st.query_params
-    if qp.get("view") or qp.get("file"):
-        _url_main()
+    if st.query_params.get("view") or st.query_params.get("file"):
+        url_main()
 
 # Sidebar: Menu at top (big square buttons); then Home (generate form) or Reports (list of reports)
 with st.sidebar:
@@ -158,16 +93,16 @@ with st.sidebar:
     _on_report = view_mode == "reports" or st.session_state.get("reports_view_filename") or st.session_state.get("reports_view_active")
     col_h, col_r = st.columns(2)
     with col_h:
-        if st.button("🏠 Home", key="sidebar_home", type="primary" if _sidebar_home else "secondary", use_container_width=True):
+        if st.button("🏠 Home", key="sidebar_home", type="primary" if _sidebar_home else "secondary", width='stretch'):
             for key in ("view_mode", "reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list"):
                 st.session_state.pop(key, None)
             st.session_state["_url_go_main"] = True
-            _url_main()
+            url_main()
             st.rerun()
     with col_r:
-        if st.button("📂 Reports", key="sidebar_reports", type="primary" if _on_report else "secondary", use_container_width=True):
+        if st.button("📂 Reports", key="sidebar_reports", type="primary" if _on_report else "secondary", width='stretch'):
             st.session_state["view_mode"] = "reports"
-            _url_reports_list()
+            url_reports_list()
             st.rerun()
     st.divider()
     if _sidebar_home:
@@ -213,119 +148,24 @@ with st.sidebar:
                 with st.spinner("Extracting station names and dates from file..."):
                     tmp_path = None
                     try:
-                        # Reset file pointer
                         instructions_file.seek(0)
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_file:
                             tmp_file.write(instructions_file.getbuffer())
-                            tmp_path = tmp_file.name
-                
-                        wb_temp = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
-                
-                        # Select sheet
-                        if sheet_name:
-                            sheet_found = None
-                            target = sheet_name.strip().lower()
-                            for name in wb_temp.sheetnames:
-                                if name.strip().lower() == target or target in name.strip().lower():
-                                    sheet_found = name
-                                    break
-                            if sheet_found:
-                                ws_temp = wb_temp[sheet_found]
-                            else:
-                                ws_temp = wb_temp.active
-                        else:
-                            ws_temp = wb_temp.active
-                    
-                        # Find column
-                            col_idx_temp, header_row_temp = find_column_by_name(ws_temp, column_name, max_header_rows=10)
-                    
-                            # Find date column
-                            date_col_temp = None
-                            for col_idx_header in range(1, min(ws_temp.max_column + 1, 50)):
-                                header_cell = ws_temp.cell(row=header_row_temp, column=col_idx_header)
-                                if header_cell.value:
-                                    header_val = str(header_cell.value).strip().lower()
-                                    if "date" in header_val:
-                                        date_col_temp = col_idx_header
-                                        break
-                    
-                            if col_idx_temp:
-                                # Extract unique station names
-                                unique_stations = set()
-                                data_start = (header_row_temp or 1) + 1
-                                max_rows_to_check = min(ws_temp.max_row + 1, data_start + 10000)  # Limit to 10k rows
-                        
-                                # Extract dates for title
-                                dates_found = []
-                                for row_num in range(data_start, max_rows_to_check):
-                                    cell = ws_temp.cell(row=row_num, column=col_idx_temp)
-                                    if cell.value:
-                                        station_val = str(cell.value).strip()
-                                        if station_val:
-                                            unique_stations.add(station_val)
-                            
-                                    # Extract date if date column found
-                                    if date_col_temp:
-                                        date_cell = ws_temp.cell(row=row_num, column=date_col_temp)
-                                        if date_cell.value:
-                                            date_val = format_value(date_cell.value)
-                                            if date_val:
-                                                dates_found.append(date_val)
-                        
-                                station_names = sorted(list(unique_stations))
-                                st.session_state.station_names_cache[file_key] = station_names
-                        
-                                # Extract and update date range for title
-                                if dates_found:
-                                    parsed_dates = []
-                                    for d in dates_found:
-                                        try:
-                                            for fmt in ["%d-%b-%Y", "%d-%b-%y", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"]:
-                                                try:
-                                                    parsed_dates.append((datetime.strptime(d, fmt), d))
-                                                    break
-                                                except ValueError:
-                                                    continue
-                                        except:
-                                            pass
-                            
-                                    if parsed_dates:
-                                        parsed_dates.sort(key=lambda x: x[0])
-                                        report_from_date = parsed_dates[0][1]
-                                        report_to_date = parsed_dates[-1][1]
-                                        if report_from_date == report_to_date:
-                                            title_str = f"⚡ REPORT FROM {report_from_date}"
-                                        else:
-                                            title_str = f"⚡ REPORT FROM {report_from_date} TO {report_to_date}"
-                                        st.session_state.report_title = title_str
-                                        st.session_state.date_range_cache[date_cache_key] = title_str
-                                    else:
-                                        dates_sorted = sorted(set(dates_found))
-                                        if len(dates_sorted) == 1:
-                                            title_str = f"⚡ REPORT FROM {dates_sorted[0]}"
-                                        elif len(dates_sorted) > 1:
-                                            title_str = f"⚡ REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
-                                        else:
-                                            title_str = "⚡ REPORT"
-                                        st.session_state.report_title = title_str
-                                        st.session_state.date_range_cache[date_cache_key] = title_str
-                                else:
-                                    st.session_state.report_title = "⚡ REPORT"
-                                    st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                            else:
-                                st.session_state.station_names_cache[file_key] = []
-                                st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                    
-                            wb_temp.close()
+                            tmp_path = Path(tmp_file.name)
+                        station_names, title_str = extract_stations_and_title(tmp_path, column_name, sheet_name)
+                        st.session_state.station_names_cache[file_key] = station_names
+                        st.session_state.date_range_cache[date_cache_key] = title_str
+                        st.session_state.report_title = title_str
                     except Exception as e:
                         st.warning(f"Could not extract station names: {e}")
                         st.session_state.station_names_cache[file_key] = []
                         st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
+                        st.session_state.report_title = "⚡ REPORT"
                     finally:
-                        if tmp_path and os.path.exists(tmp_path):
+                        if tmp_path and tmp_path.exists():
                             try:
-                                os.unlink(tmp_path)
-                            except:
+                                tmp_path.unlink()
+                            except Exception:
                                 pass
             else:
                 station_names = st.session_state.station_names_cache[file_key]
@@ -526,7 +366,7 @@ with st.sidebar:
         data_only = False
         verbose = False
         st.caption("**Reports** — select a report")
-        reports_list_sidebar = _reports_load_index()
+        reports_list_sidebar = reports_load_index()
         if not reports_list_sidebar:
             st.info("No saved reports yet. Go to **Home** to generate one.")
         else:
@@ -550,11 +390,11 @@ with st.sidebar:
                 _is_selected = (fn == _selected_report)
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", type="primary" if _is_selected else "secondary", use_container_width=True, help="Show this report on the right"):
+                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", type="primary" if _is_selected else "secondary", width='stretch', help="Show this report on the right"):
                         st.session_state["reports_view_filename"] = fn
                         st.session_state["reports_view_entry"] = entry
                         st.session_state["reports_view_from_list"] = True
-                        _url_report_file(fn)
+                        url_report_file(fn)
                         st.rerun()
                 with c2:
                     report_path = REPORTS_DIR / fn
@@ -594,7 +434,7 @@ st.markdown(subtitle_to_show)
 
 # When Reports is selected but no report chosen yet: show prompt only (no duplicate header)
 if _on_reports_list:
-    _url_reports_list()
+    url_reports_list()
     st.info("Select a report from the list on the left to view it here.")
     st.stop()
 
@@ -667,12 +507,15 @@ if 'display_output_data_key' in st.session_state:
     if output_data_key in st.session_state:
         df_output = st.session_state[output_data_key]
         if df_output is not None and not df_output.empty:
+            df_output = df_output.copy()
             df_output = df_output.fillna("").replace("None", "")
-            # Round Diff (MW) to 2 decimals for display
-            if 'Diff (MW)' in df_output.columns:
-                df_output = df_output.copy()
-                df_output['Diff (MW)'] = df_output['Diff (MW)'].apply(
-                    lambda x: round(x, 2) if isinstance(x, (int, float)) and x != "" else x
+            # Make numeric columns Arrow-compatible (float; empty/invalid -> NaN)
+            for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
+                if col in df_output.columns:
+                    df_output[col] = pd.to_numeric(df_output[col], errors="coerce")
+            if "Diff (MW)" in df_output.columns:
+                df_output["Diff (MW)"] = df_output["Diff (MW)"].apply(
+                    lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
         
         processing = st.session_state.get('processing_in_progress', False)
@@ -701,7 +544,7 @@ if 'display_output_data_key' in st.session_state:
                 with col3:
                     st.metric("Output Rows", stats.get('output_rows', 0))
                 if st.session_state.get("reports_view_active"):
-                    _url_report_file(st.session_state["reports_view_active"])  # Keep URL: ?view=report&file=...
+                    url_report_file(st.session_state["reports_view_active"])  # Keep URL: ?view=report&file=...
             
             # Create dynamic table title based on station and date range
             title_parts = ["Calculation sheet for BD and non compliance of", station_name_display]
@@ -780,7 +623,7 @@ if 'display_output_data_key' in st.session_state:
                                 data=file_data,
                                 file_name=viewing_saved,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
+                                width='stretch',
                                 key="download_button_output"
                             )
                         except Exception:
@@ -793,7 +636,7 @@ if 'display_output_data_key' in st.session_state:
                         data=file_data,
                         file_name=download_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                        width='stretch',
                         key="download_button_output"
                     )
                 elif 'last_output_path' in st.session_state:
@@ -808,7 +651,7 @@ if 'display_output_data_key' in st.session_state:
                                 data=file_data,
                                 file_name=download_filename,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
+                                width='stretch',
                                 key="download_button_output"
                             )
                         except Exception:
@@ -853,7 +696,7 @@ if 'display_output_data_key' in st.session_state:
                 AgGrid(
                     df_display,
                     gridOptions=gridOptions,
-                    height=_table_height(len(df_display)),
+                    height=table_height(len(df_display)),
                     width='100%',
                     theme='streamlit',
                     update_mode=GridUpdateMode.NO_UPDATE,
@@ -864,8 +707,8 @@ if 'display_output_data_key' in st.session_state:
                 # Use standard Streamlit dataframe with sorting
                 st.dataframe(
                     df_display,
-                    use_container_width=True,
-                    height=_table_height(len(df_display)),
+                    width='stretch',
+                    height=table_height(len(df_display)),
                     hide_index=True
                 )
             
@@ -894,7 +737,7 @@ if 'display_output_data_key' in st.session_state:
                     label_style = 'font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;'
                     with col_prev:
                         st.markdown(f'<div style="{label_style}">Page</div>', unsafe_allow_html=True)
-                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", use_container_width=True)
+                        prev_clicked = st.button("‹", key=f"{page_key}_prev", help="Previous page", width='stretch')
                         if prev_clicked:
                             st.session_state[page_key] = max(1, current_page - 1)
                             st.rerun()
@@ -906,7 +749,7 @@ if 'display_output_data_key' in st.session_state:
                         )
                     with col_next:
                         st.markdown(f'<div style="{label_style}">&nbsp;</div>', unsafe_allow_html=True)
-                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", use_container_width=True)
+                        next_clicked = st.button("›", key=f"{page_key}_next", help="Next page", width='stretch')
                         if next_clicked:
                             st.session_state[page_key] = min(total_pages, current_page + 1)
                             st.rerun()
@@ -915,11 +758,15 @@ if 'display_output_data_key' in st.session_state:
 if st.session_state.get('processing_in_progress'):
     st.session_state['_run_continue_processing'] = True
 
-# Generate button only on Home (not when viewing a saved report from Reports)
+# Generate button only on Home, and hidden while processing (show again after done)
 _viewing_report = bool(st.session_state.get("reports_view_active"))
+_processing = st.session_state.get('processing_in_progress', False)
 run_generate = False
 if not _viewing_report:
-    run_generate = st.button("🚀 Generate", type="primary", use_container_width=True) or st.session_state.pop('_run_continue_processing', False)
+    if _processing:
+        run_generate = st.session_state.pop('_run_continue_processing', False)
+    else:
+        run_generate = st.button("🚀 Generate", type="primary", width='stretch') or st.session_state.pop('_run_continue_processing', False)
 if run_generate:
     # No bottom progress bar or status text (progress shown in report area only)
     class _DummyProgress:
@@ -1044,43 +891,8 @@ if run_generate:
                     date_col = col_idx_header
         
         progress_bar.progress(40)
-        status_text.text("Creating output file...")
-        
-        # Create output Excel file
-        output_wb = openpyxl.Workbook()
-        output_sheet = output_wb.active
-        output_sheet.title = "Time Intervals"
-        
-        # Define styles
-        header_font = Font(bold=True, size=11)
-        center_align = Alignment(horizontal='center', vertical='center')
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        pad = 0
-        header_row_out, start_col, start_data_row = 1 + pad, 1 + pad, 2 + pad
-        
-        # Headers
-        output_sheet.cell(row=header_row_out, column=start_col).value = 'Date'
-        output_sheet.cell(row=header_row_out, column=start_col + 1).value = 'From'
-        output_sheet.cell(row=header_row_out, column=start_col + 2).value = 'To'
-        output_sheet.cell(row=header_row_out, column=start_col + 3).value = 'DC (MW)'
-        output_sheet.cell(row=header_row_out, column=start_col + 4).value = 'As per SLDC Scada in MW'
-        output_sheet.cell(row=header_row_out, column=start_col + 5).value = 'Diff (MW)'
-        
-        # Apply header styles
-        for c in range(6):
-            cell = output_sheet.cell(row=header_row_out, column=start_col + c)
-            cell.font = header_font
-            cell.alignment = center_align
-            cell.border = thin_border
-        
-        progress_bar.progress(50)
         status_text.text("Initializing caches...")
+        start_data_row = 2
         
         # Initialize SCADA cache
         scada_cache = None
@@ -1215,9 +1027,13 @@ if run_generate:
                                     'station_name': station_name,
                                     'current_date': date_str or '',
                                 }
-                                # Use same display as final - table updates in place
+                                # Use same display as final - table updates in place (Arrow-compatible numeric cols)
                                 partial_key = 'output_data_processing'
-                                st.session_state[partial_key] = pd.DataFrame(output_rows).fillna("").replace("None", "")
+                                partial_df = pd.DataFrame(output_rows).fillna("").replace("None", "")
+                                for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
+                                    if col in partial_df.columns:
+                                        partial_df[col] = pd.to_numeric(partial_df[col], errors="coerce")
+                                st.session_state[partial_key] = partial_df
                                 st.session_state['display_output_data_key'] = partial_key
                                 st.session_state['display_station_name'] = station_name
                                 st.session_state['processing_dc_found'] = dc_found_count
@@ -1245,56 +1061,7 @@ if run_generate:
         st.session_state.pop('output_data_processing', None)
         
         # Build output Excel from output_rows
-        output_wb = openpyxl.Workbook()
-        output_sheet = output_wb.active
-        output_sheet.title = "Time Intervals"
-        headers = ['Date', 'From', 'To', 'DC (MW)', 'As per SLDC Scada in MW', 'Diff (MW)']
-        for c, h in enumerate(headers):
-            cell = output_sheet.cell(row=header_row_out, column=start_col + c)
-            cell.value = h
-            cell.font = header_font
-            cell.alignment = center_align
-            cell.border = thin_border
-        
-        date_start_row = None
-        row_idx = start_data_row
-        for r, row_dict in enumerate(output_rows):
-            out_row = row_idx + r
-            if row_dict['Date'] and date_start_row is not None and out_row > date_start_row:
-                output_sheet.merge_cells(f"{get_column_letter(start_col)}{date_start_row}:{get_column_letter(start_col)}{out_row - 1}")
-            if row_dict['Date']:
-                date_start_row = out_row
-            output_sheet.cell(row=out_row, column=start_col).value = row_dict['Date'] or ""
-            output_sheet.cell(row=out_row, column=start_col + 1).value = row_dict['From']
-            output_sheet.cell(row=out_row, column=start_col + 2).value = row_dict['To']
-            output_sheet.cell(row=out_row, column=start_col + 3).value = row_dict['DC (MW)']
-            output_sheet.cell(row=out_row, column=start_col + 4).value = row_dict['As per SLDC Scada in MW']
-            output_sheet.cell(row=out_row, column=start_col + 5).value = row_dict['Diff (MW)']
-            for c in range(6):
-                output_sheet.cell(row=out_row, column=start_col + c).border = thin_border
-        if date_start_row is not None:
-            last_data_row = row_idx + len(output_rows) - 1
-            if last_data_row > date_start_row:
-                output_sheet.merge_cells(f"{get_column_letter(start_col)}{date_start_row}:{get_column_letter(start_col)}{last_data_row}")
-        
-        last_row = row_idx + len(output_rows) - 1
-        
-        last_row = row_idx - 1
-        last_content_col = start_col + 5
-        
-        # Freeze header
-        output_sheet.freeze_panes = output_sheet.cell(row=start_data_row, column=start_col).coordinate
-        
-        # Hide gridlines
-        output_sheet.sheet_view.showGridLines = False
-        
-        # Adjust column widths
-        for i, w in enumerate([15, 10, 10, 12, 25, 12]):
-            output_sheet.column_dimensions[get_column_letter(start_col + i)].width = w
-        
-        # Print area
-        output_sheet.print_area = f'A1:{get_column_letter(last_content_col)}{last_row}'
-        
+        output_wb = build_report_workbook(output_rows)
         progress_bar.progress(95)
         status_text.text("Saving output file...")
         
@@ -1312,7 +1079,7 @@ if run_generate:
         
         # Persist to Menu Reports: copy to reports dir and append to index
         try:
-            _reports_save_file(Path(output_path), output_filename)
+            reports_save_file(Path(output_path), output_filename)
             report_title = st.session_state.get('report_title', '')
             date_from = date_to = ""
             if "FROM" in report_title:
@@ -1321,7 +1088,7 @@ if run_generate:
                     date_from, date_to = (s.strip() for s in part.split(" TO ", 1))
                 else:
                     date_from = part
-            _reports_append_entry({
+            reports_append_entry({
                 "filename": output_filename,
                 "station": station_name,
                 "date_from": date_from,
@@ -1363,7 +1130,7 @@ if run_generate:
             # Clear Menu Reports view so this run becomes the main display
             for key in ("reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list", "view_mode"):
                 st.session_state.pop(key, None)
-            _url_main()  # Clean URL for main page
+            url_main()  # Clean URL for main page
             # Store stats for persistent display
             total_days = len({r['Date'] for r in output_rows if r.get('Date')})
             display_stats = {
