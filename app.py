@@ -515,7 +515,7 @@ if 'display_output_data_key' in st.session_state:
                     st.metric("Output Rows", stats.get('output_rows', 0))
             
             # Create dynamic table title based on station and date range
-            title_parts = ["calculation sheet for BD and non compliance of", station_name_display]
+            title_parts = ["Calculation sheet for BD and non compliance of", station_name_display]
             
             # Extract date range from report title or use current dates
             report_title = st.session_state.get('report_title', "⚡ REPORT")
