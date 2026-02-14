@@ -12,10 +12,53 @@ from pathlib import Path
 from datetime import datetime, date, time
 import tempfile
 import os
+import json
+import shutil
+from urllib.parse import quote
+from html import escape
 import pandas as pd
 
 # Slots per batch for incremental table updates
 PROCESSING_BATCH_SIZE = 5
+
+# Reports persistence: folder and index path (on disk — persists after app close)
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+REPORTS_INDEX_FILE = REPORTS_DIR / "reports_index.json"
+
+
+def _reports_ensure_dir():
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _reports_load_index():
+    """Load list of persisted reports from disk (newest first)."""
+    if not REPORTS_INDEX_FILE.exists():
+        return []
+    try:
+        with open(REPORTS_INDEX_FILE, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        return sorted(entries, key=lambda e: e.get("run_at", ""), reverse=True)
+    except Exception:
+        return []
+
+
+def _reports_append_entry(entry):
+    """Append one report entry to the index and flush to disk so it persists after app close."""
+    _reports_ensure_dir()
+    entries = _reports_load_index()
+    entries.insert(0, entry)
+    with open(REPORTS_INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _reports_save_file(src_path: Path, filename: str) -> Path:
+    """Copy report file to reports dir on disk; persists after app close."""
+    _reports_ensure_dir()
+    dest = REPORTS_DIR / filename
+    shutil.copy2(src_path, dest)
+    return dest
 
 # Table height: ~35px per row + 40px header, min 200, max 500 (fits most screens)
 def _table_height(row_count, min_h=200, max_h=500, row_px=35, header_px=40):
@@ -79,311 +122,360 @@ if 'report_title' not in st.session_state:
     st.session_state.report_title = "⚡ REPORT"
     st.session_state.report_subtitle = "Generate electrical station data reports with time intervals"
 
-# Sidebar for inputs
+def _url_reports_list():
+    """Set URL to reports list only (?view=reports)."""
+    if getattr(st, "query_params", None) is not None and hasattr(st.query_params, "from_dict"):
+        st.query_params.from_dict({"view": "reports"})
+
+
+def _url_report_file(filename):
+    """Set URL to single report (?view=report&file=...)."""
+    if getattr(st, "query_params", None) is not None and hasattr(st.query_params, "from_dict"):
+        st.query_params.from_dict({"view": "report", "file": filename})
+
+
+def _url_main():
+    """Set URL to main page (no view/file params)."""
+    if getattr(st, "query_params", None) is not None:
+        if hasattr(st.query_params, "clear"):
+            st.query_params.clear()
+        elif hasattr(st.query_params, "from_dict"):
+            st.query_params.from_dict({})
+
+
+# Sync Reports view from URL (skip if user just navigated away so we don't re-apply stale URL)
+if not st.session_state.pop("_url_go_main", None) and getattr(st, "query_params", None):
+    qp = st.query_params
+    if qp.get("view") == "report" and qp.get("file"):
+        # Direct link to a report: ?view=report&file=filename.xlsx
+        report_file = qp.get("file")
+        for entry in _reports_load_index():
+            if entry.get("filename") == report_file:
+                st.session_state["reports_view_filename"] = report_file
+                st.session_state["reports_view_entry"] = entry
+                st.session_state["reports_view_from_list"] = True
+                st.session_state.pop("view_mode", None)
+                break
+    elif qp.get("view") == "reports" and not st.session_state.get("reports_view_filename"):
+        st.session_state["view_mode"] = "reports"
+# Normalize URL when on main page: clear any stale view/file
+if getattr(st, "query_params", None) and not st.session_state.get("view_mode") and not st.session_state.get("reports_view_filename"):
+    qp = st.query_params
+    if qp.get("view") or qp.get("file"):
+        _url_main()
+
+# Sidebar: Menu at top (big square buttons); then Home (generate form) or Reports (list of reports)
 with st.sidebar:
-    st.header("📋 Input Files")
+    st.markdown('<div data-app-menu-row style="display:none" aria-hidden="true"></div>', unsafe_allow_html=True)
+    view_mode = st.session_state.get("view_mode", "")
+    _sidebar_home = not view_mode and not st.session_state.get("reports_view_filename")
+    _on_report = view_mode == "reports" or st.session_state.get("reports_view_filename") or st.session_state.get("reports_view_active")
+    col_h, col_r = st.columns(2)
+    with col_h:
+        if st.button("🏠 Home", key="sidebar_home", type="primary" if _sidebar_home else "secondary", use_container_width=True):
+            for key in ("view_mode", "reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list"):
+                st.session_state.pop(key, None)
+            st.session_state["_url_go_main"] = True
+            _url_main()
+            st.rerun()
+    with col_r:
+        if st.button("📂 Reports", key="sidebar_reports", type="primary" if _on_report else "secondary", use_container_width=True):
+            st.session_state["view_mode"] = "reports"
+            _url_reports_list()
+            st.rerun()
+    st.divider()
+    if _sidebar_home:
+        st.caption("**Home** — generate report")
+        st.header("📋 Input Files")
     
-    # Instructions file upload
-    instructions_file = st.file_uploader(
+        # Instructions file upload
+        instructions_file = st.file_uploader(
         "Instructions Excel File",
         type=['xlsx', 'xls'],
         help="Upload the instructions XLSX file",
         key="instructions_file_upload"
-    )
+        )
     
-    # Sheet name (optional) - removed from UI, defaults to active sheet
-    sheet_name = ""
+        # Sheet name (optional) - removed from UI, defaults to active sheet
+        sheet_name = ""
     
-    # Column name (read-only)
-    column_name = st.text_input(
+        # Column name (read-only)
+        column_name = st.text_input(
         "Column Name",
         value="Name of the station",
         help="Column header to search for station name",
         disabled=True
-    )
-    
-    # Extract unique station names from file
-    station_names = []
-    station_name = None
-    
-    if instructions_file is not None:
-        # Use session state to cache station names per file
-        file_key = f"{instructions_file.name}_{sheet_name}_{column_name}"
-        
-        if 'station_names_cache' not in st.session_state:
-            st.session_state.station_names_cache = {}
-        
-        # Always extract dates for title, even if station names are cached
-        date_cache_key = f"{instructions_file.name}_{sheet_name}_dates"
-        if 'date_range_cache' not in st.session_state:
-            st.session_state.date_range_cache = {}
-        
-        if date_cache_key not in st.session_state.date_range_cache or file_key not in st.session_state.station_names_cache:
-            with st.spinner("Extracting station names and dates from file..."):
-                tmp_path = None
-                try:
-                    # Reset file pointer
-                    instructions_file.seek(0)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-                        tmp_file.write(instructions_file.getbuffer())
-                        tmp_path = tmp_file.name
-                    
-                    wb_temp = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
-                    
-                    # Select sheet
-                    if sheet_name:
-                        sheet_found = None
-                        target = sheet_name.strip().lower()
-                        for name in wb_temp.sheetnames:
-                            if name.strip().lower() == target or target in name.strip().lower():
-                                sheet_found = name
-                                break
-                        if sheet_found:
-                            ws_temp = wb_temp[sheet_found]
-                        else:
-                            ws_temp = wb_temp.active
-                    else:
-                        ws_temp = wb_temp.active
-                    
-                    # Find column
-                    col_idx_temp, header_row_temp = find_column_by_name(ws_temp, column_name, max_header_rows=10)
-                    
-                    # Find date column
-                    date_col_temp = None
-                    for col_idx_header in range(1, min(ws_temp.max_column + 1, 50)):
-                        header_cell = ws_temp.cell(row=header_row_temp, column=col_idx_header)
-                        if header_cell.value:
-                            header_val = str(header_cell.value).strip().lower()
-                            if "date" in header_val:
-                                date_col_temp = col_idx_header
-                                break
-                    
-                    if col_idx_temp:
-                        # Extract unique station names
-                        unique_stations = set()
-                        data_start = (header_row_temp or 1) + 1
-                        max_rows_to_check = min(ws_temp.max_row + 1, data_start + 10000)  # Limit to 10k rows
-                        
-                        # Extract dates for title
-                        dates_found = []
-                        for row_num in range(data_start, max_rows_to_check):
-                            cell = ws_temp.cell(row=row_num, column=col_idx_temp)
-                            if cell.value:
-                                station_val = str(cell.value).strip()
-                                if station_val:
-                                    unique_stations.add(station_val)
-                            
-                            # Extract date if date column found
-                            if date_col_temp:
-                                date_cell = ws_temp.cell(row=row_num, column=date_col_temp)
-                                if date_cell.value:
-                                    date_val = format_value(date_cell.value)
-                                    if date_val:
-                                        dates_found.append(date_val)
-                        
-                        station_names = sorted(list(unique_stations))
-                        st.session_state.station_names_cache[file_key] = station_names
-                        
-                        # Extract and update date range for title
-                        if dates_found:
-                            parsed_dates = []
-                            for d in dates_found:
-                                try:
-                                    for fmt in ["%d-%b-%Y", "%d-%b-%y", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"]:
-                                        try:
-                                            parsed_dates.append((datetime.strptime(d, fmt), d))
-                                            break
-                                        except ValueError:
-                                            continue
-                                except:
-                                    pass
-                            
-                            if parsed_dates:
-                                parsed_dates.sort(key=lambda x: x[0])
-                                report_from_date = parsed_dates[0][1]
-                                report_to_date = parsed_dates[-1][1]
-                                if report_from_date == report_to_date:
-                                    title_str = f"⚡ REPORT FROM {report_from_date}"
-                                else:
-                                    title_str = f"⚡ REPORT FROM {report_from_date} TO {report_to_date}"
-                                st.session_state.report_title = title_str
-                                st.session_state.date_range_cache[date_cache_key] = title_str
-                            else:
-                                dates_sorted = sorted(set(dates_found))
-                                if len(dates_sorted) == 1:
-                                    title_str = f"⚡ REPORT FROM {dates_sorted[0]}"
-                                elif len(dates_sorted) > 1:
-                                    title_str = f"⚡ REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
-                                else:
-                                    title_str = "⚡ REPORT"
-                                st.session_state.report_title = title_str
-                                st.session_state.date_range_cache[date_cache_key] = title_str
-                        else:
-                            st.session_state.report_title = "⚡ REPORT"
-                            st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                    else:
-                        st.session_state.station_names_cache[file_key] = []
-                        st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                    
-                    wb_temp.close()
-                except Exception as e:
-                    st.warning(f"Could not extract station names: {e}")
-                    st.session_state.station_names_cache[file_key] = []
-                    st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
-                finally:
-                    if tmp_path and os.path.exists(tmp_path):
-                        try:
-                            os.unlink(tmp_path)
-                        except:
-                            pass
-        else:
-            station_names = st.session_state.station_names_cache[file_key]
-            # Restore title from cache
-            if date_cache_key in st.session_state.date_range_cache:
-                st.session_state.report_title = st.session_state.date_range_cache[date_cache_key]
-        
-        # Show dropdown (always selectbox, never editable text input)
-        if station_names:
-            station_name = st.selectbox(
-                "Station Name",
-                options=station_names,
-                help=f"Select station name from the dropdown ({len(station_names)} stations found in file)",
-                key="station_selectbox"
-            )
-            st.caption(f"✓ Found {len(station_names)} unique station(s)")
-        else:
-            # Show empty selectbox (not editable) if no stations found
-            station_name = st.selectbox(
-                "Station Name",
-                options=[],
-                help="No stations found in file. Please check the file and column name.",
-                disabled=True,
-                key="station_selectbox_empty"
-            )
-            if column_name:
-                st.caption("⚠️ No stations found. Check if column name matches the file.")
-    else:
-        # No file uploaded yet, show text input
-        station_name = st.text_input(
-            "Station Name",
-            value="",
-            help="Upload instructions file to see dropdown, or enter station name manually"
         )
     
-    st.divider()
-    st.header("⚙️ Options")
+        # Extract unique station names from file
+        station_names = []
+        station_name = None
     
-    # DC file upload (mandatory)
-    dc_file = st.file_uploader(
-        "DC File",
-        type=['xlsx', 'xls'],
-        help="DC Excel file with date-named sheets (required)"
-    )
+        if instructions_file is not None:
+            # Use session state to cache station names per file
+            file_key = f"{instructions_file.name}_{sheet_name}_{column_name}"
+            
+            if 'station_names_cache' not in st.session_state:
+                st.session_state.station_names_cache = {}
     
-    # BD folder (mandatory)
-    bd_folder_path = st.text_input(
-        "BD Folder Path",
-        value="",
-        help="Path to folder containing SCADA BD files (required)"
-    )
+            # Always extract dates for title, even if station names are cached
+            date_cache_key = f"{instructions_file.name}_{sheet_name}_dates"
+            if 'date_range_cache' not in st.session_state:
+                st.session_state.date_range_cache = {}
     
-    # BD sheet name (mandatory) - extract from BD file
-    bd_sheet = ""
-    bd_sheet_options = []
-    
-    if bd_folder_path and bd_folder_path.strip():
-        # Try to find a BD file and extract sheet names
-        bd_folder = Path(bd_folder_path.strip())
-        if bd_folder.exists() and bd_folder.is_dir():
-            # Find first Excel file in BD folder
-            bd_files = list(bd_folder.glob("*.xlsx")) + list(bd_folder.glob("*.xls"))
-            if bd_files:
-                bd_file_path = bd_files[0]
-                file_key_sheets = f"{bd_file_path.name}_sheets"
-                
-                if 'bd_sheets_cache' not in st.session_state:
-                    st.session_state.bd_sheets_cache = {}
-                
-                if file_key_sheets not in st.session_state.bd_sheets_cache:
+            if date_cache_key not in st.session_state.date_range_cache or file_key not in st.session_state.station_names_cache:
+                with st.spinner("Extracting station names and dates from file..."):
+                    tmp_path = None
                     try:
-                        with st.spinner("Extracting sheet names from BD file..."):
-                            wb_bd = openpyxl.load_workbook(bd_file_path, read_only=True, data_only=True)
-                            bd_sheet_options = wb_bd.sheetnames
-                            st.session_state.bd_sheets_cache[file_key_sheets] = bd_sheet_options
-                            wb_bd.close()
-                    except Exception as e:
-                        st.session_state.bd_sheets_cache[file_key_sheets] = []
-                else:
-                    bd_sheet_options = st.session_state.bd_sheets_cache[file_key_sheets]
-    
-    # Show BD sheet dropdown if options available
-    if bd_sheet_options:
-        bd_sheet = st.selectbox(
-            "BD Sheet Name",
-            options=bd_sheet_options,
-            help="Select sheet name from BD file (extracted from BD folder)",
-            key="bd_sheet_selectbox"
-        )
-        st.caption(f"✓ Found {len(bd_sheet_options)} sheet(s) in BD file")
-    else:
-        bd_sheet = st.text_input(
-            "BD Sheet Name",
-            value="",
-            help="Sheet name in BD files (e.g., 'DATA-CMD') (required)",
-            key="bd_sheet_text"
-        )
-        if bd_folder_path:
-            st.caption("⚠️ Could not extract sheets. Check BD folder path.")
-    
-    # SCADA column (mandatory) - extract from BD file
-    scada_column = None
-    scada_column_options = []
-    
-    if bd_folder_path and bd_folder_path.strip() and bd_sheet and str(bd_sheet).strip():
-        # Try to find a BD file and extract column names
-        bd_folder = Path(bd_folder_path.strip())
-        if bd_folder.exists() and bd_folder.is_dir():
-            # Find first Excel file in BD folder
-            bd_files = list(bd_folder.glob("*.xlsx")) + list(bd_folder.glob("*.xls"))
-            if bd_files:
-                bd_file_path = bd_files[0]
-                file_key_cols = f"{bd_file_path.name}_{bd_sheet.strip()}_columns"
+                        # Reset file pointer
+                        instructions_file.seek(0)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                            tmp_file.write(instructions_file.getbuffer())
+                            tmp_path = tmp_file.name
                 
-                if 'bd_columns_cache' not in st.session_state:
-                    st.session_state.bd_columns_cache = {}
+                        wb_temp = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
                 
-                if file_key_cols not in st.session_state.bd_columns_cache:
-                    try:
-                        with st.spinner("Extracting column names from BD file..."):
-                            wb_bd = openpyxl.load_workbook(bd_file_path, read_only=True, data_only=True)
-                            
-                            # Find the specified sheet
+                        # Select sheet
+                        if sheet_name:
                             sheet_found = None
-                            target_sheet = bd_sheet.strip().lower()
-                            for name in wb_bd.sheetnames:
-                                if name.strip().lower() == target_sheet or target_sheet in name.strip().lower():
+                            target = sheet_name.strip().lower()
+                            for name in wb_temp.sheetnames:
+                                if name.strip().lower() == target or target in name.strip().lower():
                                     sheet_found = name
                                     break
-                            
                             if sheet_found:
-                                ws_bd = wb_bd[sheet_found]
-                                # Extract column names only from header row (typically row 1)
-                                column_names = []
-                                # Most Excel files have headers in row 1
-                                header_row = 1
-                                
-                                # Extract all values from header row
-                                for col_idx in range(1, min(ws_bd.max_column + 1, 200)):
-                                    cell = ws_bd.cell(row=header_row, column=col_idx)
+                                ws_temp = wb_temp[sheet_found]
+                            else:
+                                ws_temp = wb_temp.active
+                        else:
+                            ws_temp = wb_temp.active
+                    
+                        # Find column
+                            col_idx_temp, header_row_temp = find_column_by_name(ws_temp, column_name, max_header_rows=10)
+                    
+                            # Find date column
+                            date_col_temp = None
+                            for col_idx_header in range(1, min(ws_temp.max_column + 1, 50)):
+                                header_cell = ws_temp.cell(row=header_row_temp, column=col_idx_header)
+                                if header_cell.value:
+                                    header_val = str(header_cell.value).strip().lower()
+                                    if "date" in header_val:
+                                        date_col_temp = col_idx_header
+                                        break
+                    
+                            if col_idx_temp:
+                                # Extract unique station names
+                                unique_stations = set()
+                                data_start = (header_row_temp or 1) + 1
+                                max_rows_to_check = min(ws_temp.max_row + 1, data_start + 10000)  # Limit to 10k rows
+                        
+                                # Extract dates for title
+                                dates_found = []
+                                for row_num in range(data_start, max_rows_to_check):
+                                    cell = ws_temp.cell(row=row_num, column=col_idx_temp)
                                     if cell.value:
-                                        col_name = str(cell.value).strip()
-                                        if col_name:
-                                            column_names.append(col_name)
-                                
-                                # If row 1 is empty or has very few values, try row 2
-                                if len(column_names) < 2 and ws_bd.max_row >= 2:
+                                        station_val = str(cell.value).strip()
+                                        if station_val:
+                                            unique_stations.add(station_val)
+                            
+                                    # Extract date if date column found
+                                    if date_col_temp:
+                                        date_cell = ws_temp.cell(row=row_num, column=date_col_temp)
+                                        if date_cell.value:
+                                            date_val = format_value(date_cell.value)
+                                            if date_val:
+                                                dates_found.append(date_val)
+                        
+                                station_names = sorted(list(unique_stations))
+                                st.session_state.station_names_cache[file_key] = station_names
+                        
+                                # Extract and update date range for title
+                                if dates_found:
+                                    parsed_dates = []
+                                    for d in dates_found:
+                                        try:
+                                            for fmt in ["%d-%b-%Y", "%d-%b-%y", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"]:
+                                                try:
+                                                    parsed_dates.append((datetime.strptime(d, fmt), d))
+                                                    break
+                                                except ValueError:
+                                                    continue
+                                        except:
+                                            pass
+                            
+                                    if parsed_dates:
+                                        parsed_dates.sort(key=lambda x: x[0])
+                                        report_from_date = parsed_dates[0][1]
+                                        report_to_date = parsed_dates[-1][1]
+                                        if report_from_date == report_to_date:
+                                            title_str = f"⚡ REPORT FROM {report_from_date}"
+                                        else:
+                                            title_str = f"⚡ REPORT FROM {report_from_date} TO {report_to_date}"
+                                        st.session_state.report_title = title_str
+                                        st.session_state.date_range_cache[date_cache_key] = title_str
+                                    else:
+                                        dates_sorted = sorted(set(dates_found))
+                                        if len(dates_sorted) == 1:
+                                            title_str = f"⚡ REPORT FROM {dates_sorted[0]}"
+                                        elif len(dates_sorted) > 1:
+                                            title_str = f"⚡ REPORT FROM {dates_sorted[0]} TO {dates_sorted[-1]}"
+                                        else:
+                                            title_str = "⚡ REPORT"
+                                        st.session_state.report_title = title_str
+                                        st.session_state.date_range_cache[date_cache_key] = title_str
+                                else:
+                                    st.session_state.report_title = "⚡ REPORT"
+                                    st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
+                            else:
+                                st.session_state.station_names_cache[file_key] = []
+                                st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
+                    
+                            wb_temp.close()
+                    except Exception as e:
+                        st.warning(f"Could not extract station names: {e}")
+                        st.session_state.station_names_cache[file_key] = []
+                        st.session_state.date_range_cache[date_cache_key] = "⚡ REPORT"
+                    finally:
+                        if tmp_path and os.path.exists(tmp_path):
+                            try:
+                                os.unlink(tmp_path)
+                            except:
+                                pass
+            else:
+                station_names = st.session_state.station_names_cache[file_key]
+                # Restore title from cache
+                if date_cache_key in st.session_state.date_range_cache:
+                    st.session_state.report_title = st.session_state.date_range_cache[date_cache_key]
+        
+            # Show dropdown (always selectbox, never editable text input)
+            if station_names:
+                station_name = st.selectbox(
+                    "Station Name",
+                    options=station_names,
+                    help=f"Select station name from the dropdown ({len(station_names)} stations found in file)",
+                    key="station_selectbox"
+                )
+                st.caption(f"✓ Found {len(station_names)} unique station(s)")
+            else:
+                # Show empty selectbox (not editable) if no stations found
+                station_name = st.selectbox(
+                    "Station Name",
+                    options=[],
+                    help="No stations found in file. Please check the file and column name.",
+                    disabled=True,
+                    key="station_selectbox_empty"
+                )
+                if column_name:
+                    st.caption("⚠️ No stations found. Check if column name matches the file.")
+        else:
+            # No file uploaded yet, show text input
+            station_name = st.text_input(
+                "Station Name",
+                value="",
+                help="Upload instructions file to see dropdown, or enter station name manually"
+            )
+        
+        st.divider()
+        st.header("⚙️ Options")
+        
+        # DC file upload (mandatory)
+        dc_file = st.file_uploader(
+            "DC File",
+            type=['xlsx', 'xls'],
+            help="DC Excel file with date-named sheets (required)"
+        )
+        
+        # BD folder (mandatory)
+        bd_folder_path = st.text_input(
+            "BD Folder Path",
+            value="",
+            help="Path to folder containing SCADA BD files (required)"
+        )
+        
+        # BD sheet name (mandatory) - extract from BD file
+        bd_sheet = ""
+        bd_sheet_options = []
+        
+        if bd_folder_path and bd_folder_path.strip():
+            bd_folder = Path(bd_folder_path.strip())
+            if bd_folder.exists() and bd_folder.is_dir():
+                # Find first Excel file in BD folder
+                bd_files = list(bd_folder.glob("*.xlsx")) + list(bd_folder.glob("*.xls"))
+                if bd_files:
+                    bd_file_path = bd_files[0]
+                    file_key_sheets = f"{bd_file_path.name}_sheets"
+                
+                    if 'bd_sheets_cache' not in st.session_state:
+                        st.session_state.bd_sheets_cache = {}
+                
+                    if file_key_sheets not in st.session_state.bd_sheets_cache:
+                        try:
+                            with st.spinner("Extracting sheet names from BD file..."):
+                                wb_bd = openpyxl.load_workbook(bd_file_path, read_only=True, data_only=True)
+                                bd_sheet_options = wb_bd.sheetnames
+                                st.session_state.bd_sheets_cache[file_key_sheets] = bd_sheet_options
+                                wb_bd.close()
+                        except Exception as e:
+                            st.session_state.bd_sheets_cache[file_key_sheets] = []
+                    else:
+                        bd_sheet_options = st.session_state.bd_sheets_cache[file_key_sheets]
+        
+        # Show BD sheet dropdown if options available
+        if bd_sheet_options:
+            bd_sheet = st.selectbox(
+                "BD Sheet Name",
+                options=bd_sheet_options,
+                help="Select sheet name from BD file (extracted from BD folder)",
+                key="bd_sheet_selectbox"
+            )
+            st.caption(f"✓ Found {len(bd_sheet_options)} sheet(s) in BD file")
+        else:
+            bd_sheet = st.text_input(
+                "BD Sheet Name",
+                value="",
+                help="Sheet name in BD files (e.g., 'DATA-CMD') (required)",
+                key="bd_sheet_text"
+            )
+            if bd_folder_path:
+                st.caption("⚠️ Could not extract sheets. Check BD folder path.")
+        
+        # SCADA column (mandatory) - extract from BD file
+        scada_column = None
+        scada_column_options = []
+        
+        if bd_folder_path and bd_folder_path.strip() and bd_sheet and str(bd_sheet).strip():
+            bd_folder = Path(bd_folder_path.strip())
+            if bd_folder.exists() and bd_folder.is_dir():
+                # Find first Excel file in BD folder
+                bd_files = list(bd_folder.glob("*.xlsx")) + list(bd_folder.glob("*.xls"))
+                if bd_files:
+                    bd_file_path = bd_files[0]
+                    file_key_cols = f"{bd_file_path.name}_{bd_sheet.strip()}_columns"
+                
+                    if 'bd_columns_cache' not in st.session_state:
+                        st.session_state.bd_columns_cache = {}
+                
+                    if file_key_cols not in st.session_state.bd_columns_cache:
+                        try:
+                            with st.spinner("Extracting column names from BD file..."):
+                                wb_bd = openpyxl.load_workbook(bd_file_path, read_only=True, data_only=True)
+                            
+                                # Find the specified sheet
+                                sheet_found = None
+                                target_sheet = bd_sheet.strip().lower()
+                                for name in wb_bd.sheetnames:
+                                    if name.strip().lower() == target_sheet or target_sheet in name.strip().lower():
+                                        sheet_found = name
+                                        break
+                            
+                                if sheet_found:
+                                    ws_bd = wb_bd[sheet_found]
+                                    # Extract column names only from header row (typically row 1)
                                     column_names = []
-                                    header_row = 2
+                                    # Most Excel files have headers in row 1
+                                    header_row = 1
+                                
+                                    # Extract all values from header row
                                     for col_idx in range(1, min(ws_bd.max_column + 1, 200)):
                                         cell = ws_bd.cell(row=header_row, column=col_idx)
                                         if cell.value:
@@ -391,77 +483,189 @@ with st.sidebar:
                                             if col_name:
                                                 column_names.append(col_name)
                                 
-                                scada_column_options = sorted(list(set(column_names)))  # Remove duplicates, sort
-                                st.session_state.bd_columns_cache[file_key_cols] = scada_column_options
-                            else:
-                                st.session_state.bd_columns_cache[file_key_cols] = []
+                                    # If row 1 is empty or has very few values, try row 2
+                                    if len(column_names) < 2 and ws_bd.max_row >= 2:
+                                        column_names = []
+                                        header_row = 2
+                                        for col_idx in range(1, min(ws_bd.max_column + 1, 200)):
+                                            cell = ws_bd.cell(row=header_row, column=col_idx)
+                                            if cell.value:
+                                                col_name = str(cell.value).strip()
+                                                if col_name:
+                                                    column_names.append(col_name)
+                                
+                                    scada_column_options = sorted(list(set(column_names)))  # Remove duplicates, sort
+                                    st.session_state.bd_columns_cache[file_key_cols] = scada_column_options
+                                else:
+                                    st.session_state.bd_columns_cache[file_key_cols] = []
                             
-                            wb_bd.close()
-                    except Exception as e:
-                        st.session_state.bd_columns_cache[file_key_cols] = []
-                else:
-                    scada_column_options = st.session_state.bd_columns_cache[file_key_cols]
-    
-    # Show SCADA column dropdown if options available
-    if scada_column_options:
-        scada_column = st.selectbox(
-            "SCADA Column Name",
-            options=scada_column_options,
-            help="Select column name from BD file (extracted from BD folder)",
-            key="scada_column_selectbox"
-        )
-        st.caption(f"✓ Found {len(scada_column_options)} column(s) in BD file")
+                                wb_bd.close()
+                        except Exception as e:
+                            st.session_state.bd_columns_cache[file_key_cols] = []
+                    else:
+                        scada_column_options = st.session_state.bd_columns_cache[file_key_cols]
+        
+        # Show SCADA column dropdown if options available
+        if scada_column_options:
+            scada_column = st.selectbox(
+                "SCADA Column Name",
+                options=scada_column_options,
+                help="Select column name from BD file (extracted from BD folder)",
+                key="scada_column_selectbox"
+            )
+            st.caption(f"✓ Found {len(scada_column_options)} column(s) in BD file")
+        else:
+            scada_column = st.text_input(
+                "SCADA Column Name",
+                value="",
+                help="Column header name in BD files (e.g., 'HNJA4_AG.STTN.X_BUS_GEN.MW') (required)",
+                key="scada_column_text"
+            )
+            if bd_folder_path and bd_sheet:
+                st.caption("⚠️ Could not extract columns. Check BD folder path and sheet name.")
+        
+        # Defaults (advanced options removed for now)
+        header_rows = 10
+        data_only = False
+        verbose = False
     else:
-        scada_column = st.text_input(
-            "SCADA Column Name",
-            value="",
-            help="Column header name in BD files (e.g., 'HNJA4_AG.STTN.X_BUS_GEN.MW') (required)",
-            key="scada_column_text"
-        )
-        if bd_folder_path and bd_sheet:
-            st.caption("⚠️ Could not extract columns. Check BD folder path and sheet name.")
-    
-    # Defaults (advanced options removed for now)
-    header_rows = 10
-    data_only = False
-    verbose = False
+        # Reports: show list of saved reports in sidebar; selecting one shows it on the right
+        instructions_file = None
+        station_name = ""
+        dc_file = None
+        bd_folder_path = ""
+        scada_column = None
+        bd_sheet = ""
+        header_rows = 10
+        data_only = False
+        verbose = False
+        st.caption("**Reports** — select a report")
+        reports_list_sidebar = _reports_load_index()
+        if not reports_list_sidebar:
+            st.info("No saved reports yet. Go to **Home** to generate one.")
+        else:
+            st.caption(f"{len(reports_list_sidebar)} saved report(s)")
+            for i, entry in enumerate(reports_list_sidebar):
+                fn = entry.get("filename", "")
+                station = entry.get("station", "")
+                date_from = entry.get("date_from", "")
+                date_to = entry.get("date_to", "")
+                date_range = f"{date_from} → {date_to}" if date_to else (date_from or "—")
+                label = f"{station} — {date_range}"
+                run_at = entry.get("run_at", "")
+                try:
+                    dt = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
+                    generated_str = dt.strftime("%d %b %Y, %I:%M %p")
+                except Exception:
+                    generated_str = run_at if run_at else "—"
+                # Two lines in one button (timestamp may show centered)
+                label_with_time = f"{label}\n{generated_str}"
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", use_container_width=True, help="Show this report on the right"):
+                        st.session_state["reports_view_filename"] = fn
+                        st.session_state["reports_view_entry"] = entry
+                        st.session_state["reports_view_from_list"] = True
+                        _url_report_file(fn)
+                        st.rerun()
+                with c2:
+                    report_path = REPORTS_DIR / fn
+                    if report_path.exists():
+                        with open(report_path, "rb") as f:
+                            st.download_button("📥", data=f.read(), file_name=fn, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"sidebar_dl_{i}_{fn}")
+
+# Global CSS for sidebar menu buttons (square box look); report list: two-line label
+st.markdown("""
+<style>
+    [data-app-menu-row] ~ [data-testid="stHorizontalBlock"] button,
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type button {
+        font-size: 1.05rem !important;
+        padding: 0.7rem !important;
+        font-weight: 600 !important;
+        min-height: 3rem !important;
+        border-radius: 10px !important;
+        border: 1px solid rgba(49, 51, 63, 0.2) !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+    }
+    [data-app-menu-row] ~ [data-testid="stHorizontalBlock"] button {
+        white-space: pre-line !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Display title after sidebar processing (so it can be updated by file upload)
 title_to_show = st.session_state.get('report_title', "⚡ REPORT")
 st.title(title_to_show)
 st.markdown(st.session_state.get('report_subtitle', "Generate electrical station data reports with time intervals"))
 
-# Main content area
-if instructions_file is None:
-    st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
-    st.stop()
+# When Reports is selected but no report chosen yet: prompt to select from sidebar
+if st.session_state.get("view_mode") == "reports":
+    _url_reports_list()
+    if not st.session_state.get("reports_view_filename"):
+        st.header("📂 Reports")
+        st.info("Select a report from the list on the left to view it here.")
+        st.stop()
 
-if not station_name or station_name.strip() == "":
-    if 'station_names_cache' in st.session_state and len(st.session_state.station_names_cache) > 0:
-        st.warning("⚠️ Please select a Station Name from the dropdown")
+# Main content area (skip input checks when viewing a saved report from Reports list)
+_viewing_saved_report = bool(st.session_state.get("reports_view_filename") and st.session_state.get("reports_view_entry"))
+if not _viewing_saved_report:
+    if instructions_file is None:
+        st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
+        st.stop()
+
+    if not station_name or station_name.strip() == "":
+        if 'station_names_cache' in st.session_state and len(st.session_state.station_names_cache) > 0:
+            st.warning("⚠️ Please select a Station Name from the dropdown")
+        else:
+            st.warning("⚠️ Please enter or select a Station Name")
+        st.stop()
+
+    if dc_file is None:
+        st.info("👈 Please upload a DC Excel file in the sidebar to get started.")
+        st.stop()
+
+    if not bd_folder_path or bd_folder_path.strip() == "":
+        st.info("👈 Please enter the path to the BD folder in the sidebar.")
+        st.stop()
+
+    if not scada_column or scada_column.strip() == "":
+        st.error("❌ SCADA Column Name is required. Please enter the SCADA column name.")
+        st.stop()
+
+    if not bd_sheet or bd_sheet.strip() == "":
+        st.error("❌ BD Sheet Name is required. Please enter the BD sheet name.")
+        st.stop()
+
+# When viewing a past report from Menu Reports: load it into session and set display keys (once)
+_reports_view_filename = st.session_state.get("reports_view_filename")
+_reports_view_entry = st.session_state.get("reports_view_entry")
+if _reports_view_filename and _reports_view_entry and st.session_state.get("reports_view_active") != _reports_view_filename:
+    report_key = f"output_data_report_{_reports_view_filename}"
+    report_path = REPORTS_DIR / _reports_view_filename
+    if report_path.exists():
+        try:
+            df_report = pd.read_excel(report_path, engine="openpyxl")
+            st.session_state[report_key] = df_report
+            st.session_state["display_output_data_key"] = report_key
+            st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
+            date_f = _reports_view_entry.get("date_from", "")
+            date_t = _reports_view_entry.get("date_to", "")
+            st.session_state["display_stats"] = {
+                "total_days": 0,
+                "total_slots": 0,
+                "output_rows": _reports_view_entry.get("row_count", 0),
+            }
+            if date_f and date_t:
+                st.session_state["report_title"] = f"⚡ REPORT FROM {date_f} TO {date_t}"
+            elif date_f:
+                st.session_state["report_title"] = f"⚡ REPORT FROM {date_f}"
+            else:
+                st.session_state["report_title"] = "⚡ REPORT"
+            st.session_state["reports_view_active"] = _reports_view_filename
+        except Exception:
+            st.session_state["reports_view_active"] = None
     else:
-        st.warning("⚠️ Please enter or select a Station Name")
-    st.stop()
-
-# Check if DC file is provided (mandatory)
-if dc_file is None:
-    st.info("👈 Please upload a DC Excel file in the sidebar to get started.")
-    st.stop()
-
-# Check if BD folder path is provided (mandatory)
-if not bd_folder_path or bd_folder_path.strip() == "":
-    st.info("👈 Please enter the path to the BD folder in the sidebar.")
-    st.stop()
-
-# Check if SCADA column is provided (mandatory)
-if not scada_column or scada_column.strip() == "":
-    st.error("❌ SCADA Column Name is required. Please enter the SCADA column name.")
-    st.stop()
-
-# Check if BD sheet name is provided (mandatory)
-if not bd_sheet or bd_sheet.strip() == "":
-    st.error("❌ BD Sheet Name is required. Please enter the BD sheet name.")
-    st.stop()
+        st.session_state["reports_view_active"] = None
 
 # Display output data BEFORE processing - prevents Streamlit "stale" blur during batch reruns
 if 'display_output_data_key' in st.session_state:
@@ -504,6 +708,8 @@ if 'display_output_data_key' in st.session_state:
                     st.metric("Total Slots", stats.get('total_slots', 0))
                 with col3:
                     st.metric("Output Rows", stats.get('output_rows', 0))
+                if st.session_state.get("reports_view_active"):
+                    _url_report_file(st.session_state["reports_view_active"])  # Keep URL: ?view=report&file=...
             
             # Create dynamic table title based on station and date range
             title_parts = ["Calculation sheet for BD and non compliance of", station_name_display]
@@ -570,7 +776,24 @@ if 'display_output_data_key' in st.session_state:
                     '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;">&nbsp;</div>',
                     unsafe_allow_html=True
                 )
-                if 'last_output_file_data' in st.session_state:
+                viewing_saved = st.session_state.get("reports_view_active")
+                if viewing_saved:
+                    report_path = REPORTS_DIR / viewing_saved
+                    if report_path.exists():
+                        try:
+                            with open(report_path, "rb") as f:
+                                file_data = f.read()
+                            st.download_button(
+                                label="📥 Download Output File",
+                                data=file_data,
+                                file_name=viewing_saved,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key="download_button_output"
+                            )
+                        except Exception:
+                            pass
+                elif 'last_output_file_data' in st.session_state:
                     file_data = st.session_state['last_output_file_data']
                     download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                     st.download_button(
@@ -700,11 +923,19 @@ if 'display_output_data_key' in st.session_state:
 if st.session_state.get('processing_in_progress'):
     st.session_state['_run_continue_processing'] = True
 
-# Generate button (or continue processing)
-run_generate = st.button("🚀 Generate", type="primary", use_container_width=True) or st.session_state.pop('_run_continue_processing', False)
+# Generate button only on Home (not when viewing a saved report from Reports)
+_viewing_report = bool(st.session_state.get("reports_view_active"))
+run_generate = False
+if not _viewing_report:
+    run_generate = st.button("🚀 Generate", type="primary", use_container_width=True) or st.session_state.pop('_run_continue_processing', False)
 if run_generate:
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    # No bottom progress bar or status text (progress shown in report area only)
+    class _DummyProgress:
+        def progress(self, _): pass
+    class _DummyStatus:
+        def text(self, _): pass
+    progress_bar = _DummyProgress()
+    status_text = _DummyStatus()
     
     try:
         # Use persistent temp dir for incremental updates (survives st.rerun)
@@ -803,8 +1034,6 @@ if run_generate:
             st.warning(f"⚠️ No rows found where '{column_name}' = '{station_name}'")
             wb.close()
             st.stop()
-        
-        st.success(f"✅ Found {len(matches)} matching row(s)")
         
         # Find time columns and date column
         from_time_col = None
@@ -1089,6 +1318,28 @@ if run_generate:
         with open(output_path, "rb") as f:
             st.session_state['last_output_file_data'] = f.read()
         
+        # Persist to Menu Reports: copy to reports dir and append to index
+        try:
+            _reports_save_file(Path(output_path), output_filename)
+            report_title = st.session_state.get('report_title', '')
+            date_from = date_to = ""
+            if "FROM" in report_title:
+                part = report_title.split("FROM", 1)[1].strip()
+                if " TO " in part:
+                    date_from, date_to = (s.strip() for s in part.split(" TO ", 1))
+                else:
+                    date_from = part
+            _reports_append_entry({
+                "filename": output_filename,
+                "station": station_name,
+                "date_from": date_from,
+                "date_to": date_to,
+                "run_at": datetime.now().isoformat(),
+                "row_count": len(output_rows),
+            })
+        except Exception:
+            pass  # Don't fail the run if reports persist fails
+        
         progress_bar.progress(100)
         status_text.text("✅ Processing complete!")
         
@@ -1117,9 +1368,13 @@ if run_generate:
         if df_output is not None and not df_output.empty:
             st.session_state['display_output_data_key'] = output_data_key
             st.session_state['display_station_name'] = station_name
+            # Clear Menu Reports view so this run becomes the main display
+            for key in ("reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list", "view_mode"):
+                st.session_state.pop(key, None)
+            _url_main()  # Clean URL for main page
             # Store stats for persistent display
             total_days = len({r['Date'] for r in output_rows if r.get('Date')})
-            st.session_state['display_stats'] = {
+            display_stats = {
                 'total_days': total_days,
                 'total_slots': total_slots,
                 'output_rows': len(output_rows),
@@ -1128,6 +1383,11 @@ if run_generate:
                 'scada_found': scada_found_count if scada_cache else None,
                 'scada_not_found': scada_not_found_count if scada_cache else None,
             }
+            st.session_state['display_stats'] = display_stats
+            # Persist "latest" so "Back to latest" can restore
+            st.session_state['last_display_station_name'] = station_name
+            st.session_state['last_display_stats'] = display_stats
+            st.session_state['last_report_title'] = st.session_state.get('report_title', '⚡ REPORT')
             # Rerun so display block refreshes without processing caption (processing_in_progress was cleared)
             st.rerun()
     
