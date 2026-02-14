@@ -514,7 +514,7 @@ if 'display_output_data_key' in st.session_state:
                 stats = st.session_state['display_stats']
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total Rows", stats.get('total_rows', 0))
+                    st.metric("Total Days", stats.get('total_days', 0))
                 with col2:
                     st.metric("Total Slots", stats.get('total_slots', 0))
                 with col3:
@@ -1133,8 +1133,9 @@ if run_generate:
             st.session_state['display_output_data_key'] = output_data_key
             st.session_state['display_station_name'] = station_name
             # Store stats for persistent display
+            total_days = len({r['Date'] for r in output_rows if r.get('Date')})
             st.session_state['display_stats'] = {
-                'total_rows': len(matches),
+                'total_days': total_days,
                 'total_slots': total_slots,
                 'output_rows': len(output_rows),
                 'dc_found': dc_found_count if dc_wb else None,
