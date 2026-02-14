@@ -545,6 +545,7 @@ with st.sidebar:
             st.info("No saved reports yet. Go to **Home** to generate one.")
         else:
             st.caption(f"{len(reports_list_sidebar)} saved report(s)")
+            _selected_report = st.session_state.get("reports_view_filename") or st.session_state.get("reports_view_active")
             for i, entry in enumerate(reports_list_sidebar):
                 fn = entry.get("filename", "")
                 station = entry.get("station", "")
@@ -560,9 +561,10 @@ with st.sidebar:
                     generated_str = run_at if run_at else "—"
                 # Two lines in one button (timestamp may show centered)
                 label_with_time = f"{label}\n{generated_str}"
+                _is_selected = (fn == _selected_report)
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", use_container_width=True, help="Show this report on the right"):
+                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", type="primary" if _is_selected else "secondary", use_container_width=True, help="Show this report on the right"):
                         st.session_state["reports_view_filename"] = fn
                         st.session_state["reports_view_entry"] = entry
                         st.session_state["reports_view_from_list"] = True
