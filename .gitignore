@@ -71,6 +71,7 @@ dmypy.json
 
 # Output files
 output/
+reports/
 *.xlsx
 *.xls
 !data/**/*.xlsx
