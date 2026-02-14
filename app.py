@@ -487,6 +487,12 @@ if 'display_output_data_key' in st.session_state:
         df_output = st.session_state[output_data_key]
         if df_output is not None and not df_output.empty:
             df_output = df_output.fillna("").replace("None", "")
+            # Round Diff (MW) to 2 decimals for display
+            if 'Diff (MW)' in df_output.columns:
+                df_output = df_output.copy()
+                df_output['Diff (MW)'] = df_output['Diff (MW)'].apply(
+                    lambda x: round(x, 2) if isinstance(x, (int, float)) and x != "" else x
+                )
         
         processing = st.session_state.get('processing_in_progress', False)
         
@@ -962,14 +968,14 @@ if run_generate:
                                 else:
                                     scada_not_found_count += 1
                             
-                            # Calculate difference
+                            # Calculate difference (rounded to 2 decimals)
                             diff_value = None
                             if dc_value is not None and scada_value is not None:
                                 try:
                                     dc_num = float(dc_value) if isinstance(dc_value, (int, float, str)) and str(dc_value).strip() else None
                                     scada_num = float(scada_value) if isinstance(scada_value, (int, float, str)) and str(scada_value).strip() else None
                                     if dc_num is not None and scada_num is not None:
-                                        diff_value = dc_num - scada_num
+                                        diff_value = round(dc_num - scada_num, 2)
                                 except (ValueError, TypeError):
                                     pass
                             
