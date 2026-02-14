@@ -6,16 +6,13 @@ Converts the command-line tool into a user-friendly GUI
 
 import streamlit as st
 import sys
-import re
 import uuid
 from pathlib import Path
-from datetime import datetime, date, time
+from datetime import datetime
 import tempfile
 import os
 import json
 import shutil
-from urllib.parse import quote
-from html import escape
 import pandas as pd
 
 # Slots per batch for incremental table updates
@@ -79,27 +76,16 @@ try:
 except ImportError:
     AGGrid_AVAILABLE = False
 
-# Import functions from the original script
-import sys
-from pathlib import Path
-
 # Add current directory to path to import find_station_rows module
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Import the module (it will execute, but we'll use its functions)
 try:
     import find_station_rows as fsr
-    # Get all the functions we need
+    # Get the functions we need from find_station_rows
     format_value = fsr.format_value
-    time_to_minutes = fsr.time_to_minutes
-    floor_to_15 = fsr.floor_to_15
-    minutes_to_time_str = fsr.minutes_to_time_str
     slots_15min = fsr.slots_15min
-    parse_time_str = fsr.parse_time_str
     convert_date_to_sheet_format = fsr.convert_date_to_sheet_format
-    normalize_time_str = fsr.normalize_time_str
-    convert_date_for_bd_filename = fsr.convert_date_for_bd_filename
-    find_bd_file = fsr.find_bd_file
     SCADALookupCache = fsr.SCADALookupCache
     find_scada_value = fsr.find_scada_value
     find_dc_value = fsr.find_dc_value
@@ -595,18 +581,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Display title after sidebar processing (so it can be updated by file upload)
-title_to_show = st.session_state.get('report_title', "⚡ REPORT")
+# Display title and subtitle per page (Reports list vs viewing a report vs Home)
+_on_reports_list = st.session_state.get("view_mode") == "reports" and not st.session_state.get("reports_view_filename")
+if _on_reports_list:
+    title_to_show = "📂 Reports"
+    subtitle_to_show = "Choose a report to view."
+else:
+    title_to_show = st.session_state.get('report_title', "⚡ REPORT")
+    subtitle_to_show = st.session_state.get('report_subtitle', "Generate electrical station data reports with time intervals")
 st.title(title_to_show)
-st.markdown(st.session_state.get('report_subtitle', "Generate electrical station data reports with time intervals"))
+st.markdown(subtitle_to_show)
 
-# When Reports is selected but no report chosen yet: prompt to select from sidebar
-if st.session_state.get("view_mode") == "reports":
+# When Reports is selected but no report chosen yet: show prompt only (no duplicate header)
+if _on_reports_list:
     _url_reports_list()
-    if not st.session_state.get("reports_view_filename"):
-        st.header("📂 Reports")
-        st.info("Select a report from the list on the left to view it here.")
-        st.stop()
+    st.info("Select a report from the list on the left to view it here.")
+    st.stop()
 
 # Main content area (skip input checks when viewing a saved report from Reports list)
 _viewing_saved_report = bool(st.session_state.get("reports_view_filename") and st.session_state.get("reports_view_entry"))
