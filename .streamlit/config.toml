@@ -1,0 +1,14 @@
+# Streamlit config: control what appears in the top-right app menu for end customers.
+# See: https://docs.streamlit.io/develop/concepts/architecture/app-chrome#customize-the-menu
+
+[client]
+# toolbarMode options:
+#   "auto"     = developer options on localhost / when admin (default)
+#   "viewer"   = hide Developer options & Clear cache from everyone (use for customers)
+#   "minimal"  = only options set via set_page_config or Community Cloud
+#   "developer" = show developer options to everyone
+toolbarMode = "viewer"
+
+# Optional: hide the top bar (hamburger menu + deploy) entirely
+# [ui]
+# hideTopBar = true
