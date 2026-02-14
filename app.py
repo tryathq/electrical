@@ -4,9 +4,11 @@ Streamlit Desktop App for Find Station Rows
 Converts the command-line tool into a user-friendly GUI
 """
 
+import json
 import os
 import sys
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -14,7 +16,9 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from config import PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
+from background_job import read_job as background_read_job
+from background_job import write_job as background_write_job
+from config import BACKGROUND_JOB_FILE, PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
 from excel_builder import build_report_workbook
 from instructions_parser import extract_stations_and_title
 from reports_store import append_entry as reports_append_entry
@@ -53,6 +57,225 @@ try:
 except ImportError as e:
     st.error(f"Failed to import find_station_rows module: {e}")
     st.stop()
+
+
+def _run_report_generation_worker(job_data: dict) -> None:
+    """Run full report generation in a background thread. Updates job state file for progress."""
+    temp_path = Path(job_data["temp_path"])
+    instructions_name = job_data["instructions_name"]
+    dc_name = job_data.get("dc_name") or ""
+    bd_folder_path = job_data.get("bd_folder_path") or ""
+    sheet_name = job_data.get("sheet_name") or ""
+    column_name = job_data.get("column_name") or "Name of the station"
+    station_name = job_data.get("station_name") or ""
+    header_rows = int(job_data.get("header_rows", 10))
+    data_only = bool(job_data.get("data_only", False))
+    bd_sheet = job_data.get("bd_sheet") or ""
+    scada_column = job_data.get("scada_column") or ""
+    report_title = job_data.get("report_title") or "Back Down Calculator"
+    verbose = False
+
+    def update_progress(**kwargs):
+        d = background_read_job() or {}
+        d.update(kwargs)
+        background_write_job(d)
+
+    try:
+        instructions_path = temp_path / instructions_name
+        dc_path = temp_path / dc_name if dc_name and (temp_path / dc_name).exists() else None
+
+        bd_folder = None
+        if bd_folder_path:
+            bd_folder = Path(bd_folder_path)
+            if not bd_folder.exists():
+                for pp in [Path(bd_folder_path), Path("data") / "BD", Path("data") / bd_folder_path]:
+                    if pp.exists() and pp.is_dir():
+                        bd_folder = pp
+                        break
+            if not bd_folder or not bd_folder.exists() or not bd_folder.is_dir():
+                bd_folder = None
+
+        wb = openpyxl.load_workbook(instructions_path, read_only=True, data_only=data_only)
+        if sheet_name:
+            sheet_found = None
+            target = sheet_name.strip().lower()
+            for name in wb.sheetnames:
+                if name.strip().lower() == target or target in name.strip().lower():
+                    sheet_found = name
+                    break
+            ws = wb[sheet_found] if sheet_found else wb.active
+        else:
+            ws = wb.active
+
+        col_idx, header_row = find_column_by_name(ws, column_name, max_header_rows=header_rows)
+        if col_idx is None:
+            wb.close()
+            update_progress(status="error", error_message=f"Column '{column_name}' not found")
+            return
+
+        matches = find_matching_rows(ws, col_idx, station_name, header_row)
+        if not matches:
+            wb.close()
+            update_progress(status="error", error_message="No matching rows found")
+            return
+
+        from_time_col = to_time_col = date_col = None
+        for c in range(1, ws.max_column + 1):
+            val = (ws.cell(row=header_row, column=c).value or "").strip().lower()
+            if "from" in val and "time" in val:
+                from_time_col = c
+            elif "to" in val and "time" in val:
+                to_time_col = c
+            elif "date" in val:
+                date_col = c
+
+        start_data_row = 2
+        scada_cache = None
+        if bd_folder and scada_column:
+            scada_cache = SCADALookupCache(bd_folder, scada_column, bd_sheet if bd_sheet else None)
+        dc_wb = openpyxl.load_workbook(dc_path, read_only=True, data_only=True) if dc_path else None
+
+        total_slots = 0
+        for _idx, (_row_num, row_data) in enumerate(matches, 1):
+            if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
+                from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
+                to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
+                if from_time_val is not None and to_time_val is not None:
+                    slots = slots_15min(from_time_val, to_time_val)
+                    total_slots += len(slots) if slots else 0
+
+        output_rows = []
+        dc_found_count = dc_not_found_count = scada_found_count = scada_not_found_count = 0
+        processed_slots = 0
+        current_date = None
+        previous_date_with_data = None
+        date_start_row = None
+        row_idx = start_data_row
+        last_progress_update = [0]
+
+        for idx, (row_num, row_data) in enumerate(matches, 1):
+            if not (from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data)):
+                continue
+            from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
+            to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
+            date_val = row_data[date_col - 1] if date_col and date_col <= len(row_data) else None
+            if from_time_val is None or to_time_val is None:
+                continue
+            slots = slots_15min(from_time_val, to_time_val)
+            if not slots:
+                continue
+            date_str = format_value(date_val) if date_val else ""
+            if date_str and date_str != previous_date_with_data and previous_date_with_data is not None:
+                date_start_row = None
+            if date_str and date_str != current_date:
+                current_date = date_str
+                previous_date_with_data = date_str
+                date_start_row = row_idx
+
+            for slot_idx, (slot_from, slot_to) in enumerate(slots):
+                row_date = date_str if (slot_idx == 0 and date_str and date_start_row == row_idx) else ""
+                dc_value = None
+                if dc_wb and date_str:
+                    sheet_name_dc = convert_date_to_sheet_format(date_str)
+                    if sheet_name_dc:
+                        dc_value = find_dc_value(dc_wb, sheet_name_dc, slot_from, slot_to, debug=verbose)
+                        if dc_value is not None:
+                            dc_found_count += 1
+                        else:
+                            dc_not_found_count += 1
+                scada_value = None
+                if scada_cache and date_str:
+                    scada_value = find_scada_value(scada_cache, date_str, slot_from, debug=verbose, show_progress=False)
+                    if scada_value is not None:
+                        scada_found_count += 1
+                    else:
+                        scada_not_found_count += 1
+                diff_value = None
+                if dc_value is not None and scada_value is not None:
+                    try:
+                        dc_num = float(dc_value) if isinstance(dc_value, (int, float, str)) and str(dc_value).strip() else None
+                        scada_num = float(scada_value) if isinstance(scada_value, (int, float, str)) and str(scada_value).strip() else None
+                        if dc_num is not None and scada_num is not None:
+                            diff_value = round(dc_num - scada_num, 2)
+                    except (ValueError, TypeError):
+                        pass
+                output_rows.append({
+                    "Date": row_date,
+                    "From": slot_from,
+                    "To": slot_to,
+                    "DC (MW)": dc_value if dc_value is not None else "",
+                    "As per SLDC Scada in MW": scada_value if scada_value is not None else "",
+                    "Diff (MW)": diff_value if diff_value is not None else "",
+                })
+                row_idx += 1
+                processed_slots += 1
+                if total_slots > 0 and processed_slots - last_progress_update[0] >= max(1, PROCESSING_BATCH_SIZE):
+                    last_progress_update[0] = processed_slots
+                    pct = min(99, int(100 * processed_slots / total_slots))
+                    update_progress(processed_slots=processed_slots, total_slots=total_slots, progress_pct=pct, current_date=date_str or "")
+                    # Write partial output for live table view on Home page
+                    try:
+                        partial_path = temp_path / "partial_output.json"
+                        with open(partial_path, "w", encoding="utf-8") as f:
+                            json.dump(output_rows, f, default=str, indent=0)
+                    except Exception:
+                        pass
+
+        wb.close()
+        if dc_wb:
+            dc_wb.close()
+        if scada_cache:
+            scada_cache.close_all()
+
+        output_wb = build_report_workbook(output_rows)
+        output_filename = f"{station_name.replace(' ', '_').replace('/', '_')}_{datetime.now().strftime('%d-%b-%Y_%H-%M-%S-%p')}.xlsx"
+        output_path = temp_path / output_filename
+        output_wb.save(output_path)
+
+        reports_save_file(Path(output_path), output_filename)
+        date_from = date_to = ""
+        if " — " in report_title:
+            part = report_title.split(" — ", 1)[1].strip()
+            if " to " in part:
+                date_from, date_to = (s.strip() for s in part.split(" to ", 1))
+            else:
+                date_from = part
+        elif " FROM " in report_title.upper():
+            # Parse "⚡ GENERATE REPORT FROM 01-Jan-2026 TO 31-Jan-2026" (from instructions_parser)
+            idx_from = report_title.upper().index(" FROM ")
+            part = report_title[idx_from + 6 :].strip()  # after " FROM "
+            if " TO " in part.upper():
+                idx_to = part.upper().index(" TO ")
+                date_from = part[:idx_to].strip()
+                date_to = part[idx_to + 4 :].strip()
+            else:
+                date_from = part
+        if not date_from and output_rows:
+            # Fallback: derive from actual data
+            dates_in_data = [r.get("Date") for r in output_rows if r.get("Date")]
+            if dates_in_data:
+                date_from = min(dates_in_data)
+                date_to = max(dates_in_data) if len(dates_in_data) > 1 else ""
+        reports_append_entry({
+            "filename": output_filename,
+            "station": station_name,
+            "date_from": date_from,
+            "date_to": date_to,
+            "run_at": datetime.now().isoformat(),
+            "row_count": len(output_rows),
+        })
+
+        update_progress(
+            status="done",
+            output_filename=output_filename,
+            progress_pct=100,
+            processed_slots=processed_slots,
+            total_slots=total_slots,
+            error_message=None,
+        )
+    except Exception as e:
+        update_progress(status="error", error_message=str(e))
+
 
 # Page config
 st.set_page_config(
@@ -366,41 +589,61 @@ with st.sidebar:
         data_only = False
         verbose = False
         st.caption("**Back Down reports** — select a report")
-        reports_list_sidebar = reports_load_index()
+        reports_list_sidebar = list(reports_load_index())
+        # Prepend in-progress report to list when a background job is running
+        _bg_job_sidebar = background_read_job()
+        if _bg_job_sidebar and _bg_job_sidebar.get("status") == "running":
+            _gen_station = _bg_job_sidebar.get("station_name", "Report")
+            _gen_entry = {
+                "filename": "__generating__",
+                "station": _gen_station,
+                "date_from": "",
+                "date_to": "",
+                "run_at": _bg_job_sidebar.get("created_at", ""),
+                "row_count": 0,
+                "_generating": True,
+            }
+            reports_list_sidebar.insert(0, _gen_entry)
         if not reports_list_sidebar:
             st.info("No saved reports yet. Go to **Home** to generate one.")
         else:
-            st.caption(f"{len(reports_list_sidebar)} saved report(s)")
+            st.caption(f"{len(reports_list_sidebar)} report(s)")
             _selected_report = st.session_state.get("reports_view_filename") or st.session_state.get("reports_view_active")
             for i, entry in enumerate(reports_list_sidebar):
                 fn = entry.get("filename", "")
+                is_generating = fn == "__generating__" or entry.get("_generating")
                 station = entry.get("station", "")
                 date_from = entry.get("date_from", "")
                 date_to = entry.get("date_to", "")
-                date_range = f"{date_from} → {date_to}" if date_to else (date_from or "—")
-                label = f"{station} — {date_range}"
-                run_at = entry.get("run_at", "")
-                try:
-                    dt = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
-                    generated_str = dt.strftime("%d %b %Y, %I:%M %p")
-                except Exception:
-                    generated_str = run_at if run_at else "—"
-                # Two lines in one button (timestamp may show centered)
+                if is_generating:
+                    date_range = "generating…"
+                    label = f"⏳ {station} — generating…"
+                    generated_str = "In progress"
+                else:
+                    date_range = f"{date_from} → {date_to}" if date_to else (date_from or "—")
+                    label = f"{station} — {date_range}"
+                    run_at = entry.get("run_at", "")
+                    try:
+                        dt = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
+                        generated_str = dt.strftime("%d %b %Y, %I:%M %p")
+                    except Exception:
+                        generated_str = run_at if run_at else "—"
                 label_with_time = f"{label}\n{generated_str}"
                 _is_selected = (fn == _selected_report)
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", type="primary" if _is_selected else "secondary", width='stretch', help="Show this report on the right"):
+                    if st.button(label_with_time, key=f"sidebar_rep_{i}_{fn}", type="primary" if _is_selected else "secondary", width='stretch', help="Show this report on the right" if not is_generating else "Show current progress"):
                         st.session_state["reports_view_filename"] = fn
                         st.session_state["reports_view_entry"] = entry
                         st.session_state["reports_view_from_list"] = True
                         url_report_file(fn)
                         st.rerun()
                 with c2:
-                    report_path = REPORTS_DIR / fn
-                    if report_path.exists():
-                        with open(report_path, "rb") as f:
-                            st.download_button("📥", data=f.read(), file_name=fn, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"sidebar_dl_{i}_{fn}")
+                    if not is_generating:
+                        report_path = REPORTS_DIR / fn
+                        if report_path.exists():
+                            with open(report_path, "rb") as f:
+                                st.download_button("📥", data=f.read(), file_name=fn, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"sidebar_dl_{i}_{fn}")
 
 # Global CSS for sidebar menu buttons (square box look); report list: two-line label
 st.markdown("""
@@ -428,13 +671,52 @@ if _on_reports_list:
     title_to_show = "Back Down reports"
     subtitle_to_show = "Choose a report to view."
 elif _viewing_saved_report_header:
-    title_to_show = st.session_state.get('report_title', "Back Down Calculator")
+    title_to_show = st.session_state.get('report_title', "Back Down Report")
     subtitle_to_show = "Generated calculation sheet for BD and non compliance"
 else:
     title_to_show = st.session_state.get('report_title', "Back Down Calculator")
     subtitle_to_show = st.session_state.get('report_subtitle', "Generate calculation sheet for BD and non compliance")
 st.title(title_to_show)
 st.markdown(subtitle_to_show)
+
+# Background report generation: show status on any page so user can navigate away
+_bg_job = background_read_job()
+_status = _bg_job.get("status") if _bg_job else None
+_reports_view_filename = st.session_state.get("reports_view_filename")
+_reports_view_entry = st.session_state.get("reports_view_entry")
+_viewing_saved_report = bool(_reports_view_filename and _reports_view_entry)
+# When job completes, clear "viewing generating report" so user is not stuck
+if _status == "done" and _reports_view_filename == "__generating__":
+    for key in ("reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list"):
+        st.session_state.pop(key, None)
+    _reports_view_filename = _reports_view_entry = None
+    _viewing_saved_report = False
+if _status in ("running", "done", "error"):
+    if _status == "running":
+        # Only show "generating" banner when viewing Home or the in-progress report, not when viewing a completed report
+        if not _viewing_saved_report or _reports_view_filename == "__generating__":
+            _pct = _bg_job.get("progress_pct", 0)
+            _processed = _bg_job.get("processed_slots", 0)
+            _total = _bg_job.get("total_slots", 0) or 1
+            _date = _bg_job.get("current_date", "")
+            st.info(f"⏳ **Report generating in background** — {_pct}% ({_processed} / {_total} slots)" + (f" — {_date}" if _date else "") + ". You can switch to **Reports** or other pages; generation will continue.")
+            if st.button("🔄 Refresh status", key="bg_job_refresh"):
+                st.rerun()
+    elif _status == "done":
+        # Only show "Report ready" banner on Home page, not when viewing Reports page
+        if not _viewing_saved_report and not _on_reports_list:
+            st.success(f"✅ **Report ready.** It has been saved to **Reports**. Go to **Reports** in the sidebar to view and download.")
+            if st.button("View in Reports", key="bg_job_view"):
+                st.session_state["view_mode"] = "reports"
+                url_reports_list()
+                background_write_job({})  # clear job so banner doesn't show again
+                st.rerun()
+    elif _status == "error":
+        _err = _bg_job.get("error_message", "Unknown error")
+        st.error(f"❌ **Report generation failed:** {_err}")
+        if st.button("Dismiss", key="bg_job_error_dismiss"):
+            background_write_job({})
+            st.rerun()
 
 # When Reports is selected but no report chosen yet: show prompt only (no duplicate header)
 if _on_reports_list:
@@ -443,8 +725,69 @@ if _on_reports_list:
     st.stop()
 
 # Main content area (skip input checks when viewing a saved report from Reports list)
-_viewing_saved_report = bool(st.session_state.get("reports_view_filename") and st.session_state.get("reports_view_entry"))
-if not _viewing_saved_report:
+_reports_view_filename = st.session_state.get("reports_view_filename")
+_reports_view_entry = st.session_state.get("reports_view_entry")
+_viewing_saved_report = bool(_reports_view_filename and _reports_view_entry)
+
+# On Home or when "generating" report selected from list: show live table view while background report is generating
+_viewing_generating_report = _viewing_saved_report and _reports_view_filename == "__generating__"
+if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_generating_report):
+    _temp_path = Path(_bg_job.get("temp_path", ""))
+    _partial_file = _temp_path / "partial_output.json" if _temp_path else None
+    if _partial_file and _partial_file.exists():
+        try:
+            with open(_partial_file, "r", encoding="utf-8") as f:
+                _partial_rows = json.load(f)
+        except Exception:
+            _partial_rows = []
+        if not _partial_rows and _viewing_generating_report:
+            st.caption("⏳ Waiting for first batch of data… Click **Refresh status** below to update.")
+            if st.button("🔄 Refresh status", key="bg_job_refresh_wait"):
+                st.rerun()
+        elif _partial_rows:
+            _total_slots = _bg_job.get("total_slots", 0) or 1
+            _processed = _bg_job.get("processed_slots", 0)
+            _pct = _bg_job.get("progress_pct", 0)
+            _current_date = _bg_job.get("current_date", "")
+            _station_bg = _bg_job.get("station_name", "")
+            st.progress(_pct / 100.0)
+            if _current_date:
+                st.caption(f"⏳ Processing day {_current_date} — {len(_partial_rows)} rows so far")
+            else:
+                st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
+            _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
+            for _col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
+                if _col in _df_partial.columns:
+                    _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
+            if "Diff (MW)" in _df_partial.columns:
+                _df_partial["Diff (MW)"] = _df_partial["Diff (MW)"].apply(
+                    lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
+                )
+            _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
+            st.divider()
+            st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
+            if AGGrid_AVAILABLE:
+                _gb = GridOptionsBuilder.from_dataframe(_df_partial)
+                _gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
+                _gb.configure_side_bar()
+                _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
+                _gb.configure_selection("single")
+                AgGrid(
+                    _df_partial,
+                    gridOptions=_gb.build(),
+                    height=table_height(min(len(_df_partial), 25)),
+                    width="100%",
+                    theme="streamlit",
+                    update_mode=GridUpdateMode.NO_UPDATE,
+                    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+                    allow_unsafe_jscode=True,
+                )
+            else:
+                st.dataframe(_df_partial, width="stretch", height=table_height(len(_df_partial)), hide_index=True)
+            if st.button("🔄 Refresh status", key="bg_job_refresh_table"):
+                st.rerun()
+# Show upload/form prompts only when not viewing a report and not in the middle of background generation
+if not _viewing_saved_report and _status != "running":
     if instructions_file is None:
         st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
         st.stop()
@@ -473,38 +816,48 @@ if not _viewing_saved_report:
         st.stop()
 
 # When viewing a past report from Menu Reports: load it into session and set display keys (once)
-_reports_view_filename = st.session_state.get("reports_view_filename")
-_reports_view_entry = st.session_state.get("reports_view_entry")
 if _reports_view_filename and _reports_view_entry and st.session_state.get("reports_view_active") != _reports_view_filename:
-    report_key = f"output_data_report_{_reports_view_filename}"
-    report_path = REPORTS_DIR / _reports_view_filename
-    if report_path.exists():
-        try:
-            df_report = pd.read_excel(report_path, engine="openpyxl")
-            st.session_state[report_key] = df_report
-            st.session_state["display_output_data_key"] = report_key
-            st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
-            date_f = _reports_view_entry.get("date_from", "")
-            date_t = _reports_view_entry.get("date_to", "")
-            st.session_state["display_stats"] = {
-                "total_days": 0,
-                "total_slots": 0,
-                "output_rows": _reports_view_entry.get("row_count", 0),
-            }
-            if date_f and date_t:
-                st.session_state["report_title"] = f"Back Down Calculator — {date_f} to {date_t}"
-            elif date_f:
-                st.session_state["report_title"] = f"Back Down Calculator — {date_f}"
-            else:
-                st.session_state["report_title"] = "Back Down Calculator"
-            st.session_state["reports_view_active"] = _reports_view_filename
-        except Exception:
-            st.session_state["reports_view_active"] = None
+    if _reports_view_filename == "__generating__":
+        # In-progress report: no file to load; just set active and title from job
+        st.session_state["reports_view_active"] = "__generating__"
+        if _bg_job:
+            st.session_state["report_title"] = _bg_job.get("report_title", "Back Down Report")
     else:
-        st.session_state["reports_view_active"] = None
+        report_key = f"output_data_report_{_reports_view_filename}"
+        report_path = REPORTS_DIR / _reports_view_filename
+        if report_path.exists():
+            try:
+                df_report = pd.read_excel(report_path, engine="openpyxl")
+                st.session_state[report_key] = df_report
+                st.session_state["display_output_data_key"] = report_key
+                st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
+                date_f = _reports_view_entry.get("date_from", "")
+                date_t = _reports_view_entry.get("date_to", "")
+                st.session_state["display_stats"] = {
+                    "total_days": 0,
+                    "total_slots": 0,
+                    "output_rows": _reports_view_entry.get("row_count", 0),
+                }
+                if date_f and date_t:
+                    st.session_state["report_title"] = f"Back Down Report — {date_f} to {date_t}"
+                elif date_f:
+                    st.session_state["report_title"] = f"Back Down Report — {date_f}"
+                else:
+                    st.session_state["report_title"] = "Back Down Report"
+                st.session_state["reports_view_active"] = _reports_view_filename
+            except Exception:
+                st.session_state["reports_view_active"] = None
+        else:
+            st.session_state["reports_view_active"] = None
 
-# Display output data BEFORE processing - prevents Streamlit "stale" blur during batch reruns
-if 'display_output_data_key' in st.session_state:
+# Display output data BEFORE processing - skip when we're showing background job live table (Home or Reports list)
+_showing_bg_job_table = (
+    _status == "running"
+    and _bg_job
+    and (Path(_bg_job.get("temp_path", "")) / "partial_output.json").exists()
+    and (not _viewing_saved_report or _reports_view_filename == "__generating__")
+)
+if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
     output_data_key = st.session_state['display_output_data_key']
     station_name_display = st.session_state.get('display_station_name', '')
     
@@ -710,404 +1063,56 @@ if 'display_output_data_key' in st.session_state:
                 else:
                     st.caption(f"Showing all {total_rows} rows")
 
-# Trigger continue processing on next run
-if st.session_state.get('processing_in_progress'):
-    st.session_state['_run_continue_processing'] = True
-
-# Generate button only on Home, and hidden while processing (show again after done)
+# Generate button only on Home, and hidden while a report is generating in the background
 _viewing_report = bool(st.session_state.get("reports_view_active"))
-_processing = st.session_state.get('processing_in_progress', False)
 run_generate = False
-if not _viewing_report:
-    if _processing:
-        run_generate = st.session_state.pop('_run_continue_processing', False)
-    else:
-        run_generate = st.button("🚀 Generate", type="primary", width='stretch') or st.session_state.pop('_run_continue_processing', False)
+if not _viewing_report and _status != "running":
+    run_generate = st.button("🚀 Generate", type="primary", width='stretch') or st.session_state.pop('_run_continue_processing', False)
 if run_generate:
-    # No bottom progress bar or status text (progress shown in report area only)
-    class _DummyProgress:
-        def progress(self, _): pass
-    class _DummyStatus:
-        def text(self, _): pass
-    progress_bar = _DummyProgress()
-    status_text = _DummyStatus()
-    
+    # Start report generation in a background thread so it continues when user navigates away
     try:
-        # Use persistent temp dir for incremental updates (survives st.rerun)
-        processing_continue = st.session_state.get('processing_in_progress', False)
-        if processing_continue:
-            temp_path = Path(st.session_state.get('processing_temp_dir', ''))
-            if not temp_path.exists():
-                st.error("❌ Processing temp dir not found. Please run Generate again.")
-                st.session_state.pop('processing_in_progress', None)
-                st.stop()
-            instructions_path = temp_path / st.session_state.get('processing_instructions_name', instructions_file.name)
-            dc_path = temp_path / st.session_state.get('processing_dc_name', dc_file.name if dc_file else '') if st.session_state.get('processing_dc_name') else None
-            if dc_path and not dc_path.exists():
-                dc_path = None
-        else:
-            # First run: create persistent temp dir
-            temp_base = Path(tempfile.gettempdir()) / "electrical_app"
-            temp_base.mkdir(parents=True, exist_ok=True)
-            run_id = str(uuid.uuid4())[:8]
-            temp_path = temp_base / run_id
-            temp_path.mkdir(exist_ok=True)
-            
-            # Save instructions file
-            instructions_path = temp_path / instructions_file.name
-            with open(instructions_path, "wb") as f:
-                f.write(instructions_file.getbuffer())
-            
-            # Save DC file if provided
-            dc_path = None
-            if dc_file:
-                dc_path = temp_path / dc_file.name
-                with open(dc_path, "wb") as f:
-                    f.write(dc_file.getbuffer())
-        
-        # Handle BD folder (runs for both first run and continue)
-        bd_folder = None
-        if bd_folder_path:
-            bd_folder = Path(bd_folder_path)
-            if not bd_folder.exists():
-                if instructions_file.name:
-                    possible_paths = [
-                        Path(bd_folder_path),
-                        Path("data") / "BD",
-                        Path("data") / bd_folder_path,
-                    ]
-                    for pp in possible_paths:
-                        if pp.exists() and pp.is_dir():
-                            bd_folder = pp
-                            break
-            if bd_folder and bd_folder.exists() and bd_folder.is_dir():
-                pass
-            else:
-                bd_folder = None
-                if scada_column:
-                    st.warning(f"⚠️ BD folder not found: {bd_folder_path}")
-        
-        progress_bar.progress(10)
-        status_text.text("Loading instructions file...")
-        
-        # Load workbook
-        wb = openpyxl.load_workbook(instructions_path, read_only=True, data_only=data_only)
-        
-        # Select sheet
-        if sheet_name:
-            sheet_found = None
-            target = sheet_name.strip().lower()
-            for name in wb.sheetnames:
-                if name.strip().lower() == target or target in name.strip().lower():
-                    sheet_found = name
-                    break
-            if sheet_found is None:
-                st.error(f"❌ Sheet '{sheet_name}' not found in {instructions_file.name}")
-                st.write(f"Available sheets: {', '.join(wb.sheetnames)}")
-                st.stop()
-            ws = wb[sheet_found]
-        else:
-            ws = wb.active
-        
-        progress_bar.progress(20)
-        status_text.text("Finding station column...")
-        
-        # Find column
-        col_idx, header_row = find_column_by_name(ws, column_name, max_header_rows=header_rows)
-        if col_idx is None:
-            st.error(f"❌ Column '{column_name}' not found in sheet '{ws.title}'")
-            st.write(f"Searched first {header_rows} rows.")
-            st.stop()
-        
-        progress_bar.progress(30)
-        status_text.text("Finding matching rows...")
-        
-        # Find matching rows
-        matches = find_matching_rows(ws, col_idx, station_name, header_row)
-        
-        if not matches:
-            st.warning(f"⚠️ No rows found where '{column_name}' = '{station_name}'")
-            wb.close()
-            st.stop()
-        
-        # Find time columns and date column
-        from_time_col = None
-        to_time_col = None
-        date_col = None
-        
-        for col_idx_header in range(1, ws.max_column + 1):
-            header_cell = ws.cell(row=header_row, column=col_idx_header)
-            if header_cell.value:
-                header_val = str(header_cell.value).strip().lower()
-                if "from" in header_val and "time" in header_val:
-                    from_time_col = col_idx_header
-                elif "to" in header_val and "time" in header_val:
-                    to_time_col = col_idx_header
-                elif "date" in header_val:
-                    date_col = col_idx_header
-        
-        progress_bar.progress(40)
-        status_text.text("Initializing caches...")
-        start_data_row = 2
-        
-        # Initialize SCADA cache
-        scada_cache = None
-        if bd_folder and scada_column:
-            scada_cache = SCADALookupCache(bd_folder, scada_column, bd_sheet if bd_sheet else None)
-        
-        # Load DC workbook
-        dc_wb = None
-        if dc_path and dc_path.exists():
-            dc_wb = openpyxl.load_workbook(dc_path, read_only=True, data_only=True)
-        
-        # Load or init output_rows for incremental display
-        if processing_continue:
-            output_rows = st.session_state.get('processing_output_rows', [])
-            dc_found_count = st.session_state.get('processing_dc_found', 0)
-            dc_not_found_count = st.session_state.get('processing_dc_not_found', 0)
-            scada_found_count = st.session_state.get('processing_scada_found', 0)
-            scada_not_found_count = st.session_state.get('processing_scada_not_found', 0)
-            slots_to_skip = len(output_rows)
-        else:
-            output_rows = []
-            dc_found_count = dc_not_found_count = scada_found_count = scada_not_found_count = 0
-            slots_to_skip = 0
-        
-        total_slots = 0
-        processed_slots = 0
-        current_date = None
-        previous_date_with_data = None
-        date_start_row = None
-        row_idx = start_data_row
-        
-        # Count total slots
-        for idx, (row_num, row_data) in enumerate(matches, 1):
-            if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
-                from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
-                to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
-                if from_time_val is not None and to_time_val is not None:
-                    slots = slots_15min(from_time_val, to_time_val)
-                    total_slots += len(slots) if slots else 0
-        
-        progress_bar.progress(60)
-        status_text.text(f"Processing {len(matches)} time range(s) with {total_slots} total slots...")
-        
-        # Process matches - accumulate to output_rows, batch and rerun for incremental display
-        batch_count = 0
-        for idx, (row_num, row_data) in enumerate(matches, 1):
-            if from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data):
-                from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
-                to_time_val = row_data[to_time_col - 1] if to_time_col > 0 else None
-                date_val = row_data[date_col - 1] if date_col and date_col > 0 and date_col <= len(row_data) else None
-                
-                if from_time_val is not None and to_time_val is not None:
-                    slots = slots_15min(from_time_val, to_time_val)
-                    if slots:
-                        date_str = format_value(date_val) if date_val else ""
-                        
-                        if date_str and date_str != previous_date_with_data and previous_date_with_data is not None:
-                            date_start_row = None
-                        
-                        if date_str and date_str != current_date:
-                            current_date = date_str
-                            previous_date_with_data = date_str
-                            date_start_row = row_idx
-                        
-                        for slot_idx, (slot_from, slot_to) in enumerate(slots):
-                            # Skip already-processed slots when resuming
-                            if processed_slots < slots_to_skip:
-                                processed_slots += 1
-                                row_idx += 1
-                                continue
-                            
-                            row_date = date_str if (slot_idx == 0 and date_str and date_start_row == row_idx) else ""
-                            
-                            # DC lookup
-                            dc_value = None
-                            if dc_wb and date_str:
-                                sheet_name_dc = convert_date_to_sheet_format(date_str)
-                                if sheet_name_dc:
-                                    dc_value = find_dc_value(dc_wb, sheet_name_dc, slot_from, slot_to, debug=verbose)
-                                    if dc_value is not None:
-                                        dc_found_count += 1
-                                    else:
-                                        dc_not_found_count += 1
-                            
-                            # SCADA lookup
-                            scada_value = None
-                            if scada_cache and date_str:
-                                scada_value = find_scada_value(scada_cache, date_str, slot_from, debug=verbose, show_progress=False)
-                                if scada_value is not None:
-                                    scada_found_count += 1
-                                else:
-                                    scada_not_found_count += 1
-                            
-                            # Calculate difference (rounded to 2 decimals)
-                            diff_value = None
-                            if dc_value is not None and scada_value is not None:
-                                try:
-                                    dc_num = float(dc_value) if isinstance(dc_value, (int, float, str)) and str(dc_value).strip() else None
-                                    scada_num = float(scada_value) if isinstance(scada_value, (int, float, str)) and str(scada_value).strip() else None
-                                    if dc_num is not None and scada_num is not None:
-                                        diff_value = round(dc_num - scada_num, 2)
-                                except (ValueError, TypeError):
-                                    pass
-                            
-                            output_rows.append({
-                                'Date': row_date,
-                                'From': slot_from,
-                                'To': slot_to,
-                                'DC (MW)': dc_value if dc_value is not None else "",
-                                'As per SLDC Scada in MW': scada_value if scada_value is not None else "",
-                                'Diff (MW)': diff_value if diff_value is not None else ""
-                            })
-                            
-                            row_idx += 1
-                            processed_slots += 1
-                            batch_count += 1
-                            
-                            # Update progress
-                            if total_slots > 0:
-                                progress = 60 + int(30 * processed_slots / total_slots)
-                                progress_bar.progress(min(progress, 90))
-                            
-                            # Batch checkpoint: save and rerun for incremental display
-                            if batch_count >= PROCESSING_BATCH_SIZE and processed_slots < total_slots:
-                                st.session_state['processing_in_progress'] = True
-                                st.session_state['processing_output_rows'] = output_rows
-                                st.session_state['processing_temp_dir'] = str(temp_path)
-                                st.session_state['processing_instructions_name'] = instructions_path.name
-                                st.session_state['processing_dc_name'] = dc_path.name if dc_path else None
-                                st.session_state['processing_config'] = {
-                                    'total_slots': total_slots,
-                                    'station_name': station_name,
-                                    'current_date': date_str or '',
-                                }
-                                # Use same display as final - table updates in place (Arrow-compatible numeric cols)
-                                partial_key = 'output_data_processing'
-                                partial_df = pd.DataFrame(output_rows).fillna("").replace("None", "")
-                                for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
-                                    if col in partial_df.columns:
-                                        partial_df[col] = pd.to_numeric(partial_df[col], errors="coerce")
-                                st.session_state[partial_key] = partial_df
-                                st.session_state['display_output_data_key'] = partial_key
-                                st.session_state['display_station_name'] = station_name
-                                st.session_state['processing_dc_found'] = dc_found_count
-                                st.session_state['processing_dc_not_found'] = dc_not_found_count
-                                st.session_state['processing_scada_found'] = scada_found_count
-                                st.session_state['processing_scada_not_found'] = scada_not_found_count
-                                wb.close()
-                                if dc_wb:
-                                    dc_wb.close()
-                                if scada_cache:
-                                    scada_cache.close_all()
-                                st.rerun()
-        
-        # Done - build Excel from output_rows
-        wb.close()
-        if dc_wb:
-            dc_wb.close()
-        if scada_cache:
-            scada_cache.close_all()
-        
-        # Clear processing state
-        st.session_state.pop('processing_in_progress', None)
-        st.session_state.pop('processing_output_rows', None)
-        st.session_state.pop('processing_config', None)
-        st.session_state.pop('output_data_processing', None)
-        
-        # Build output Excel from output_rows
-        output_wb = build_report_workbook(output_rows)
-        progress_bar.progress(95)
-        status_text.text("Saving output file...")
-        
-        # Save to temp file
-        output_filename = f"{station_name.replace(' ', '_').replace('/', '_')}_{datetime.now().strftime('%d-%b-%Y_%H-%M-%S-%p')}.xlsx"
-        output_path = temp_path / output_filename
-        output_wb.save(output_path)
-        
-        # Store output filename and path in session_state for persistence across reruns
-        st.session_state['last_output_filename'] = output_filename
-        st.session_state['last_output_path'] = str(output_path)
-        # Also store file data in session_state so it persists even if temp file is deleted
-        with open(output_path, "rb") as f:
-            st.session_state['last_output_file_data'] = f.read()
-        
-        # Persist to Menu Reports: copy to reports dir and append to index
-        try:
-            reports_save_file(Path(output_path), output_filename)
-            report_title = st.session_state.get('report_title', '')
-            date_from = date_to = ""
-            if " — " in report_title:
-                part = report_title.split(" — ", 1)[1].strip()
-                if " to " in part:
-                    date_from, date_to = (s.strip() for s in part.split(" to ", 1))
-                else:
-                    date_from = part
-            reports_append_entry({
-                "filename": output_filename,
-                "station": station_name,
-                "date_from": date_from,
-                "date_to": date_to,
-                "run_at": datetime.now().isoformat(),
-                "row_count": len(output_rows),
-            })
-        except Exception:
-            pass  # Don't fail the run if reports persist fails
-        
-        progress_bar.progress(100)
-        status_text.text("✅ Processing complete!")
-        
-        # Close workbooks
-        wb.close()
-        if dc_wb:
-            dc_wb.close()
-        if scada_cache:
-            scada_cache.close_all()
-        
-        # Display summary
-        st.success("✅ Output file generated successfully!")
-        
-        # Load output data for display - store in session state to persist across reruns
-        output_data_key = f"output_data_{output_filename}"
-        
-        try:
-            df_output = pd.read_excel(output_path, engine='openpyxl')
-            st.session_state[output_data_key] = df_output
-            st.session_state[f"{output_data_key}_path"] = str(output_path)
-        except Exception as e:
-            st.error(f"Could not load output data: {e}")
-            df_output = None
-        
-        # Store reference and stats for display outside this block
-        if df_output is not None and not df_output.empty:
-            st.session_state['display_output_data_key'] = output_data_key
-            st.session_state['display_station_name'] = station_name
-            # Clear Menu Reports view so this run becomes the main display
-            for key in ("reports_view_filename", "reports_view_entry", "reports_view_active", "reports_view_from_list", "view_mode"):
-                st.session_state.pop(key, None)
-            url_main()  # Clean URL for main page
-            # Store stats for persistent display
-            total_days = len({r['Date'] for r in output_rows if r.get('Date')})
-            display_stats = {
-                'total_days': total_days,
-                'total_slots': total_slots,
-                'output_rows': len(output_rows),
-                'dc_found': dc_found_count if dc_wb else None,
-                'dc_not_found': dc_not_found_count if dc_wb else None,
-                'scada_found': scada_found_count if scada_cache else None,
-                'scada_not_found': scada_not_found_count if scada_cache else None,
-            }
-            st.session_state['display_stats'] = display_stats
-            # Persist "latest" so "Back to latest" can restore
-            st.session_state['last_display_station_name'] = station_name
-            st.session_state['last_display_stats'] = display_stats
-            st.session_state['last_report_title'] = st.session_state.get('report_title', 'Back Down Calculator')
-            # Rerun so display block refreshes without processing caption (processing_in_progress was cleared)
-            st.rerun()
-    
+        temp_base = Path(tempfile.gettempdir()) / "electrical_app"
+        temp_base.mkdir(parents=True, exist_ok=True)
+        run_id = str(uuid.uuid4())[:8]
+        temp_path = temp_base / run_id
+        temp_path.mkdir(exist_ok=True)
+
+        instructions_path = temp_path / instructions_file.name
+        with open(instructions_path, "wb") as f:
+            f.write(instructions_file.getbuffer())
+        dc_name = ""
+        if dc_file:
+            dc_path = temp_path / dc_file.name
+            with open(dc_path, "wb") as f:
+                f.write(dc_file.getbuffer())
+            dc_name = dc_file.name
+
+        job_data = {
+            "status": "running",
+            "temp_path": str(temp_path),
+            "instructions_name": instructions_file.name,
+            "dc_name": dc_name,
+            "bd_folder_path": bd_folder_path or "",
+            "sheet_name": sheet_name or "",
+            "column_name": column_name or "Name of the station",
+            "station_name": station_name or "",
+            "header_rows": header_rows,
+            "data_only": data_only,
+            "bd_sheet": bd_sheet or "",
+            "scada_column": scada_column or "",
+            "report_title": st.session_state.get("report_title", "Back Down Calculator"),
+            "created_at": datetime.now().isoformat(),
+            "progress_pct": 0,
+            "processed_slots": 0,
+            "total_slots": 0,
+        }
+        background_write_job(job_data)
+        thread = threading.Thread(target=_run_report_generation_worker, args=(job_data,), daemon=True)
+        thread.start()
+        st.success("Report generation started in the background. You can switch to Reports or other pages.")
+        st.rerun()
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"Failed to start report generation: {str(e)}")
         if verbose:
             import traceback
             st.code(traceback.format_exc())

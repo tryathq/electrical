@@ -6,6 +6,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 REPORTS_DIR = APP_DIR / "reports"
 REPORTS_INDEX_FILE = REPORTS_DIR / "reports_index.json"
+BACKGROUND_JOB_FILE = APP_DIR / "background_job.json"
 
 # Processing
 PROCESSING_BATCH_SIZE = 5
