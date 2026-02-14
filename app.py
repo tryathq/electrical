@@ -240,6 +240,22 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 date_from, date_to = (s.strip() for s in part.split(" to ", 1))
             else:
                 date_from = part
+        elif " FROM " in report_title.upper():
+            # Parse "⚡ GENERATE REPORT FROM 01-Jan-2026 TO 31-Jan-2026" (from instructions_parser)
+            idx_from = report_title.upper().index(" FROM ")
+            part = report_title[idx_from + 6 :].strip()  # after " FROM "
+            if " TO " in part.upper():
+                idx_to = part.upper().index(" TO ")
+                date_from = part[:idx_to].strip()
+                date_to = part[idx_to + 4 :].strip()
+            else:
+                date_from = part
+        if not date_from and output_rows:
+            # Fallback: derive from actual data
+            dates_in_data = [r.get("Date") for r in output_rows if r.get("Date")]
+            if dates_in_data:
+                date_from = min(dates_in_data)
+                date_to = max(dates_in_data) if len(dates_in_data) > 1 else ""
         reports_append_entry({
             "filename": output_filename,
             "station": station_name,
@@ -655,7 +671,7 @@ if _on_reports_list:
     title_to_show = "Back Down reports"
     subtitle_to_show = "Choose a report to view."
 elif _viewing_saved_report_header:
-    title_to_show = st.session_state.get('report_title', "Back Down Calculator")
+    title_to_show = st.session_state.get('report_title', "Back Down Report")
     subtitle_to_show = "Generated calculation sheet for BD and non compliance"
 else:
     title_to_show = st.session_state.get('report_title', "Back Down Calculator")
@@ -803,7 +819,7 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
         # In-progress report: no file to load; just set active and title from job
         st.session_state["reports_view_active"] = "__generating__"
         if _bg_job:
-            st.session_state["report_title"] = _bg_job.get("report_title", "Back Down Calculator")
+            st.session_state["report_title"] = _bg_job.get("report_title", "Back Down Report")
     else:
         report_key = f"output_data_report_{_reports_view_filename}"
         report_path = REPORTS_DIR / _reports_view_filename
@@ -821,11 +837,11 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
                     "output_rows": _reports_view_entry.get("row_count", 0),
                 }
                 if date_f and date_t:
-                    st.session_state["report_title"] = f"Back Down Calculator — {date_f} to {date_t}"
+                    st.session_state["report_title"] = f"Back Down Report — {date_f} to {date_t}"
                 elif date_f:
-                    st.session_state["report_title"] = f"Back Down Calculator — {date_f}"
+                    st.session_state["report_title"] = f"Back Down Report — {date_f}"
                 else:
-                    st.session_state["report_title"] = "Back Down Calculator"
+                    st.session_state["report_title"] = "Back Down Report"
                 st.session_state["reports_view_active"] = _reports_view_filename
             except Exception:
                 st.session_state["reports_view_active"] = None
