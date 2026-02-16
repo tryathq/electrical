@@ -204,7 +204,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 mus_value = None
                 if diff_value is not None:
                     try:
-                        mus_value = round(float(diff_value) / 4000, 3)
+                        mus_value = float(diff_value) / 4000
                     except (TypeError, ValueError):
                         mus_value = None
                 output_rows.append({
@@ -831,10 +831,6 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
                 _df_partial["Diff (MW)"] = _df_partial["Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
-            if "Mus" in _df_partial.columns:
-                _df_partial["Mus"] = _df_partial["Mus"].apply(
-                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
-                )
             if "Sum Mus" in _df_partial.columns:
                 _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
@@ -949,10 +945,6 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             if "Diff (MW)" in df_output.columns:
                 df_output["Diff (MW)"] = df_output["Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
-                )
-            if "Mus" in df_output.columns:
-                df_output["Mus"] = df_output["Mus"].apply(
-                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
             if "Sum Mus" in df_output.columns:
                 df_output["Sum Mus"] = df_output["Sum Mus"].apply(
