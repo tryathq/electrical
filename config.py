@@ -10,6 +10,8 @@ BACKGROUND_JOB_FILE = APP_DIR / "background_job.json"
 
 # Processing
 PROCESSING_BATCH_SIZE = 5
+# Write partial_output.json every N slots (job progress still every PROCESSING_BATCH_SIZE)
+PARTIAL_OUTPUT_WRITE_INTERVAL = 25
 
 # Table display
 TABLE_ROW_PX = 35

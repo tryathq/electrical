@@ -18,7 +18,7 @@ import streamlit as st
 
 from background_job import read_job as background_read_job
 from background_job import write_job as background_write_job
-from config import BACKGROUND_JOB_FILE, PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
+from config import BACKGROUND_JOB_FILE, PARTIAL_OUTPUT_WRITE_INTERVAL, PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
 from excel_builder import build_report_workbook
 from instructions_parser import extract_stations_and_title
 from reports_store import append_entry as reports_append_entry
@@ -152,8 +152,10 @@ def _run_report_generation_worker(job_data: dict) -> None:
         date_start_row = None
         row_idx = start_data_row
         last_progress_update = [0]
+        entry_start_idx = 0  # Track start of current instruction entry
 
         for idx, (row_num, row_data) in enumerate(matches, 1):
+            entry_start_idx = len(output_rows)  # Start of this instruction entry
             if not (from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data)):
                 continue
             from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
@@ -199,6 +201,12 @@ def _run_report_generation_worker(job_data: dict) -> None:
                             diff_value = round(dc_num - scada_num, 2)
                     except (ValueError, TypeError):
                         pass
+                mus_value = None
+                if diff_value is not None:
+                    try:
+                        mus_value = round(float(diff_value) / 4000, 3)
+                    except (TypeError, ValueError):
+                        mus_value = None
                 output_rows.append({
                     "Date": row_date,
                     "From": slot_from,
@@ -206,6 +214,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "DC (MW)": dc_value if dc_value is not None else "",
                     "As per SLDC Scada in MW": scada_value if scada_value is not None else "",
                     "Diff (MW)": diff_value if diff_value is not None else "",
+                    "Mus": mus_value if mus_value is not None else "",
+                    "Sum Mus": "",
                 })
                 row_idx += 1
                 processed_slots += 1
@@ -213,13 +223,41 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     last_progress_update[0] = processed_slots
                     pct = min(99, int(100 * processed_slots / total_slots))
                     update_progress(processed_slots=processed_slots, total_slots=total_slots, progress_pct=pct, current_date=date_str or "")
-                    # Write partial output for live table view on Home page
-                    try:
-                        partial_path = temp_path / "partial_output.json"
-                        with open(partial_path, "w", encoding="utf-8") as f:
-                            json.dump(output_rows, f, default=str, indent=0)
-                    except Exception:
-                        pass
+                    # Write partial output every N slots to reduce I/O; also write first batch so table appears soon
+                    if (
+                        processed_slots % PARTIAL_OUTPUT_WRITE_INTERVAL == 0
+                        or processed_slots == PROCESSING_BATCH_SIZE
+                    ):
+                        try:
+                            partial_path = temp_path / "partial_output.json"
+                            with open(partial_path, "w", encoding="utf-8") as f:
+                                json.dump(output_rows, f, default=str, indent=0)
+                        except Exception:
+                            pass
+            
+            # After processing all slots for this instruction entry, add a separate summary row with sum of Mus
+            entry_end_idx = len(output_rows)
+            if entry_end_idx > entry_start_idx:
+                mus_sum = 0.0
+                for i in range(entry_start_idx, entry_end_idx):
+                    mus_val = output_rows[i].get("Mus")
+                    if mus_val != "" and mus_val is not None:
+                        try:
+                            mus_sum += float(mus_val)
+                        except (TypeError, ValueError):
+                            pass
+                mus_sum_rounded = round(mus_sum, 3) if mus_sum else 0.0
+                # Append a single row after this instruction block with only Sum Mus filled
+                output_rows.append({
+                    "Date": "",
+                    "From": "",
+                    "To": "",
+                    "DC (MW)": "",
+                    "As per SLDC Scada in MW": "",
+                    "Diff (MW)": "",
+                    "Mus": "",
+                    "Sum Mus": mus_sum_rounded,
+                })
 
         wb.close()
         if dc_wb:
@@ -307,6 +345,9 @@ if not st.session_state.pop("_url_go_main", None) and getattr(st, "query_params"
 if getattr(st, "query_params", None) and not st.session_state.get("view_mode") and not st.session_state.get("reports_view_filename"):
     if st.query_params.get("view") or st.query_params.get("file"):
         url_main()
+
+# Read background job once per run (used by sidebar and main content)
+_cached_bg_job = background_read_job()
 
 # Sidebar: Menu at top (big square buttons); then Home (generate form) or Reports (list of reports)
 with st.sidebar:
@@ -573,6 +614,33 @@ with st.sidebar:
             if bd_folder_path and bd_sheet:
                 st.caption("⚠️ Could not extract columns. Check BD folder path and sheet name.")
         
+        st.divider()
+        st.header("📈 Ramp Rates")
+        ramp_up = st.number_input(
+            "Ramp up",
+            value=40,
+            min_value=0,
+            step=1,
+            help="Ramp up value (default 40)",
+            key="ramp_up_input"
+        )
+        ramp_down_1 = st.number_input(
+            "Ramp Down 5",
+            value=15,
+            min_value=0,
+            step=1,
+            help="Ramp down value (default 15)",
+            key="ramp_down_1_input"
+        )
+        ramp_down_2 = st.number_input(
+            "Ramp Down 10",
+            value=27.5,
+            min_value=0.0,
+            step=0.5,
+            help="Ramp down value (default 27.5)",
+            key="ramp_down_2_input"
+        )
+        
         # Defaults (advanced options removed for now)
         header_rows = 10
         data_only = False
@@ -589,9 +657,9 @@ with st.sidebar:
         data_only = False
         verbose = False
         st.caption("**Back Down reports** — select a report")
-        reports_list_sidebar = list(reports_load_index())
+        reports_list_sidebar = reports_load_index()
         # Prepend in-progress report to list when a background job is running
-        _bg_job_sidebar = background_read_job()
+        _bg_job_sidebar = _cached_bg_job
         if _bg_job_sidebar and _bg_job_sidebar.get("status") == "running":
             _gen_station = _bg_job_sidebar.get("station_name", "Report")
             _gen_entry = {
@@ -680,7 +748,7 @@ st.title(title_to_show)
 st.markdown(subtitle_to_show)
 
 # Background report generation: show status on any page so user can navigate away
-_bg_job = background_read_job()
+_bg_job = _cached_bg_job
 _status = _bg_job.get("status") if _bg_job else None
 _reports_view_filename = st.session_state.get("reports_view_filename")
 _reports_view_entry = st.session_state.get("reports_view_entry")
@@ -756,12 +824,20 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
             else:
                 st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
             _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
-            for _col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
+            for _col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus"):
                 if _col in _df_partial.columns:
                     _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
             if "Diff (MW)" in _df_partial.columns:
                 _df_partial["Diff (MW)"] = _df_partial["Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
+                )
+            if "Mus" in _df_partial.columns:
+                _df_partial["Mus"] = _df_partial["Mus"].apply(
+                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
+                )
+            if "Sum Mus" in _df_partial.columns:
+                _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
+                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
             _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
             st.divider()
@@ -867,12 +943,20 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             df_output = df_output.copy()
             df_output = df_output.fillna("").replace("None", "")
             # Make numeric columns Arrow-compatible (float; empty/invalid -> NaN)
-            for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)"):
+            for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus"):
                 if col in df_output.columns:
                     df_output[col] = pd.to_numeric(df_output[col], errors="coerce")
             if "Diff (MW)" in df_output.columns:
                 df_output["Diff (MW)"] = df_output["Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
+                )
+            if "Mus" in df_output.columns:
+                df_output["Mus"] = df_output["Mus"].apply(
+                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
+                )
+            if "Sum Mus" in df_output.columns:
+                df_output["Sum Mus"] = df_output["Sum Mus"].apply(
+                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
         
         processing = st.session_state.get('processing_in_progress', False)
