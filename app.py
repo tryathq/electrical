@@ -120,14 +120,19 @@ def _run_report_generation_worker(job_data: dict) -> None:
             return
 
         from_time_col = to_time_col = date_col = None
+        from_date_col = None  # Prefer "From Date" for instruction block date
         for c in range(1, ws.max_column + 1):
             val = (ws.cell(row=header_row, column=c).value or "").strip().lower()
             if "from" in val and "time" in val:
                 from_time_col = c
             elif "to" in val and "time" in val:
                 to_time_col = c
-            elif "date" in val:
+            elif "from" in val and "date" in val:
+                from_date_col = c
+            elif "date" in val and date_col is None:
                 date_col = c
+        if from_date_col is not None:
+            date_col = from_date_col
 
         start_data_row = 2
         scada_cache = None
@@ -154,6 +159,16 @@ def _run_report_generation_worker(job_data: dict) -> None:
         last_progress_update = [0]
         entry_start_idx = 0  # Track start of current instruction entry
 
+        def _num_display(val, decimals=2):
+            """Format value for DC/SCADA columns: numeric to 2 decimals, else as-is."""
+            if val is None or val == "":
+                return ""
+            try:
+                n = float(val) if isinstance(val, (int, float, str)) and str(val).strip() else None
+                return round(n, decimals) if n is not None else val
+            except (ValueError, TypeError):
+                return val
+
         for idx, (row_num, row_data) in enumerate(matches, 1):
             entry_start_idx = len(output_rows)  # Start of this instruction entry
             if not (from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data)):
@@ -175,7 +190,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 date_start_row = row_idx
 
             for slot_idx, (slot_from, slot_to) in enumerate(slots):
-                row_date = date_str if (slot_idx == 0 and date_str and date_start_row == row_idx) else ""
+                # Show date at start of each instruction entry (first slot of this row only)
+                row_date = date_str if (slot_idx == 0 and date_str) else ""
                 dc_value = None
                 if dc_wb and date_str:
                     sheet_name_dc = convert_date_to_sheet_format(date_str)
@@ -211,8 +227,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "Date": row_date,
                     "From": slot_from,
                     "To": slot_to,
-                    "DC (MW)": dc_value if dc_value is not None else "",
-                    "As per SLDC Scada in MW": scada_value if scada_value is not None else "",
+                    "DC (MW)": _num_display(dc_value) if dc_value is not None else "",
+                    "As per SLDC Scada in MW": _num_display(scada_value) if scada_value is not None else "",
                     "Diff (MW)": diff_value if diff_value is not None else "",
                     "Mus": mus_value if mus_value is not None else "",
                     "Sum Mus": "",
