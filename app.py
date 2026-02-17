@@ -840,14 +840,14 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
             st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
             if AGGrid_AVAILABLE:
                 _gb = GridOptionsBuilder.from_dataframe(_df_partial)
-                _gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
+                _gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
                 _gb.configure_side_bar()
                 _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
                 _gb.configure_selection("single")
                 AgGrid(
                     _df_partial,
                     gridOptions=_gb.build(),
-                    height=table_height(min(len(_df_partial), 25)),
+                    height=table_height(min(len(_df_partial), 20)),
                     width="100%",
                     theme="streamlit",
                     update_mode=GridUpdateMode.NO_UPDATE,
@@ -1095,7 +1095,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             if AGGrid_AVAILABLE:
                 # Use AgGrid: pass full data; table has built-in pagination (no "Rows per page" or our page nav)
                 gb = GridOptionsBuilder.from_dataframe(df_filtered)
-                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
+                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
                 gb.configure_side_bar()
                 gb.configure_default_column(
                     sortable=True,
@@ -1109,7 +1109,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 AgGrid(
                     df_filtered,
                     gridOptions=gridOptions,
-                    height=table_height(min(len(df_filtered), 25)),
+                    height=table_height(min(len(df_filtered), 20)),
                     width='100%',
                     theme='streamlit',
                     update_mode=GridUpdateMode.NO_UPDATE,
@@ -1118,7 +1118,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 )
             else:
                 # Fallback: manual pagination (no "Rows per page" selectbox)
-                rows_per_page = 25
+                rows_per_page = 20
                 total_pages = (total_rows + rows_per_page - 1) // rows_per_page if total_rows > 0 else 1
                 current_page = st.session_state.get(page_key, 1)
                 if current_page > total_pages:
