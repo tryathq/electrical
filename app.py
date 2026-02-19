@@ -59,6 +59,16 @@ except ImportError as e:
     st.stop()
 
 
+def _parse_float(val, default: float) -> float:
+    """Parse value to float; return default if invalid or empty."""
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def _run_report_generation_worker(job_data: dict) -> None:
     """Run full report generation in a background thread. Updates job state file for progress."""
     temp_path = Path(job_data["temp_path"])
@@ -120,14 +130,19 @@ def _run_report_generation_worker(job_data: dict) -> None:
             return
 
         from_time_col = to_time_col = date_col = None
+        from_date_col = None  # Prefer "From Date" for instruction block date
         for c in range(1, ws.max_column + 1):
             val = (ws.cell(row=header_row, column=c).value or "").strip().lower()
             if "from" in val and "time" in val:
                 from_time_col = c
             elif "to" in val and "time" in val:
                 to_time_col = c
-            elif "date" in val:
+            elif "from" in val and "date" in val:
+                from_date_col = c
+            elif "date" in val and date_col is None:
                 date_col = c
+        if from_date_col is not None:
+            date_col = from_date_col
 
         start_data_row = 2
         scada_cache = None
@@ -154,6 +169,16 @@ def _run_report_generation_worker(job_data: dict) -> None:
         last_progress_update = [0]
         entry_start_idx = 0  # Track start of current instruction entry
 
+        def _num_display(val, decimals=2):
+            """Format value for DC/SCADA columns: numeric to 2 decimals, else as-is."""
+            if val is None or val == "":
+                return ""
+            try:
+                n = float(val) if isinstance(val, (int, float, str)) and str(val).strip() else None
+                return round(n, decimals) if n is not None else val
+            except (ValueError, TypeError):
+                return val
+
         for idx, (row_num, row_data) in enumerate(matches, 1):
             entry_start_idx = len(output_rows)  # Start of this instruction entry
             if not (from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data)):
@@ -175,7 +200,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 date_start_row = row_idx
 
             for slot_idx, (slot_from, slot_to) in enumerate(slots):
-                row_date = date_str if (slot_idx == 0 and date_str and date_start_row == row_idx) else ""
+                # Show date at start of each instruction entry (first slot of this row only)
+                row_date = date_str if (slot_idx == 0 and date_str) else ""
                 dc_value = None
                 if dc_wb and date_str:
                     sheet_name_dc = convert_date_to_sheet_format(date_str)
@@ -211,8 +237,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "Date": row_date,
                     "From": slot_from,
                     "To": slot_to,
-                    "DC (MW)": dc_value if dc_value is not None else "",
-                    "As per SLDC Scada in MW": scada_value if scada_value is not None else "",
+                    "DC (MW)": _num_display(dc_value) if dc_value is not None else "",
+                    "As per SLDC Scada in MW": _num_display(scada_value) if scada_value is not None else "",
                     "Diff (MW)": diff_value if diff_value is not None else "",
                     "Mus": mus_value if mus_value is not None else "",
                     "Sum Mus": "",
@@ -616,30 +642,22 @@ with st.sidebar:
         
         st.divider()
         st.header("📈 Ramp Rates")
-        ramp_up = st.number_input(
-            "Ramp up",
-            value=40,
-            min_value=0,
-            step=1,
-            help="Ramp up value (default 40)",
-            key="ramp_up_input"
-        )
-        ramp_down_1 = st.number_input(
-            "Ramp Down 5",
-            value=15,
-            min_value=0,
-            step=1,
-            help="Ramp down value (default 15)",
-            key="ramp_down_1_input"
-        )
-        ramp_down_2 = st.number_input(
-            "Ramp Down 10",
-            value=27.5,
-            min_value=0.0,
-            step=0.5,
-            help="Ramp down value (default 27.5)",
-            key="ramp_down_2_input"
-        )
+        st.caption("**Ramp Up** (MW)", help="Ramp up rate in MW for 5, 10, 15 min gaps")
+        ru1, ru2, ru3 = st.columns(3)
+        with ru1:
+            ramp_up_5 = st.text_input("5 min", value="15", placeholder="15", key="ramp_up_5_input")
+        with ru2:
+            ramp_up_10 = st.text_input("10 min", value="27.5", placeholder="27.5", key="ramp_up_10_input")
+        with ru3:
+            ramp_up_15 = st.text_input("15 min", value="40", placeholder="40", key="ramp_up_15_input")
+        st.caption("**Ramp Down** (MW)", help="Ramp down rate in MW for 5, 10, 15 min gaps")
+        rd1, rd2, rd3 = st.columns(3)
+        with rd1:
+            ramp_down_5 = st.text_input("5 min", value="15", placeholder="15", key="ramp_down_5_input")
+        with rd2:
+            ramp_down_10 = st.text_input("10 min", value="27.5", placeholder="27.5", key="ramp_down_10_input")
+        with rd3:
+            ramp_down_15 = st.text_input("15 min", value="40", placeholder="40", key="ramp_down_15_input")
         
         # Defaults (advanced options removed for now)
         header_rows = 10
@@ -1177,6 +1195,12 @@ if run_generate:
             "bd_sheet": bd_sheet or "",
             "scada_column": scada_column or "",
             "report_title": st.session_state.get("report_title", "Back Down Calculator"),
+            "ramp_up_5": _parse_float(st.session_state.get("ramp_up_5_input", "15"), 15),
+            "ramp_up_10": _parse_float(st.session_state.get("ramp_up_10_input", "27.5"), 27.5),
+            "ramp_up_15": _parse_float(st.session_state.get("ramp_up_15_input", "40"), 40),
+            "ramp_down_5": _parse_float(st.session_state.get("ramp_down_5_input", "15"), 15),
+            "ramp_down_10": _parse_float(st.session_state.get("ramp_down_10_input", "27.5"), 27.5),
+            "ramp_down_15": _parse_float(st.session_state.get("ramp_down_15_input", "40"), 40),
             "created_at": datetime.now().isoformat(),
             "progress_pct": 0,
             "processed_slots": 0,
