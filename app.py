@@ -59,6 +59,16 @@ except ImportError as e:
     st.stop()
 
 
+def _parse_float(val, default: float) -> float:
+    """Parse value to float; return default if invalid or empty."""
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def _run_report_generation_worker(job_data: dict) -> None:
     """Run full report generation in a background thread. Updates job state file for progress."""
     temp_path = Path(job_data["temp_path"])
@@ -632,30 +642,22 @@ with st.sidebar:
         
         st.divider()
         st.header("📈 Ramp Rates")
-        ramp_up = st.number_input(
-            "Ramp up",
-            value=40,
-            min_value=0,
-            step=1,
-            help="Ramp up value (default 40)",
-            key="ramp_up_input"
-        )
-        ramp_down_1 = st.number_input(
-            "Ramp Down 5",
-            value=15,
-            min_value=0,
-            step=1,
-            help="Ramp down value (default 15)",
-            key="ramp_down_1_input"
-        )
-        ramp_down_2 = st.number_input(
-            "Ramp Down 10",
-            value=27.5,
-            min_value=0.0,
-            step=0.5,
-            help="Ramp down value (default 27.5)",
-            key="ramp_down_2_input"
-        )
+        st.caption("**Ramp Up** (MW)", help="Ramp up rate in MW for 5, 10, 15 min gaps")
+        ru1, ru2, ru3 = st.columns(3)
+        with ru1:
+            ramp_up_5 = st.text_input("5 min", value="15", placeholder="15", key="ramp_up_5_input")
+        with ru2:
+            ramp_up_10 = st.text_input("10 min", value="27.5", placeholder="27.5", key="ramp_up_10_input")
+        with ru3:
+            ramp_up_15 = st.text_input("15 min", value="40", placeholder="40", key="ramp_up_15_input")
+        st.caption("**Ramp Down** (MW)", help="Ramp down rate in MW for 5, 10, 15 min gaps")
+        rd1, rd2, rd3 = st.columns(3)
+        with rd1:
+            ramp_down_5 = st.text_input("5 min", value="15", placeholder="15", key="ramp_down_5_input")
+        with rd2:
+            ramp_down_10 = st.text_input("10 min", value="27.5", placeholder="27.5", key="ramp_down_10_input")
+        with rd3:
+            ramp_down_15 = st.text_input("15 min", value="40", placeholder="40", key="ramp_down_15_input")
         
         # Defaults (advanced options removed for now)
         header_rows = 10
@@ -1193,6 +1195,12 @@ if run_generate:
             "bd_sheet": bd_sheet or "",
             "scada_column": scada_column or "",
             "report_title": st.session_state.get("report_title", "Back Down Calculator"),
+            "ramp_up_5": _parse_float(st.session_state.get("ramp_up_5_input", "15"), 15),
+            "ramp_up_10": _parse_float(st.session_state.get("ramp_up_10_input", "27.5"), 27.5),
+            "ramp_up_15": _parse_float(st.session_state.get("ramp_up_15_input", "40"), 40),
+            "ramp_down_5": _parse_float(st.session_state.get("ramp_down_5_input", "15"), 15),
+            "ramp_down_10": _parse_float(st.session_state.get("ramp_down_10_input", "27.5"), 27.5),
+            "ramp_down_15": _parse_float(st.session_state.get("ramp_down_15_input", "40"), 40),
             "created_at": datetime.now().isoformat(),
             "progress_pct": 0,
             "processed_slots": 0,
