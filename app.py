@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -1232,129 +1233,141 @@ _viewing_generating_report = _viewing_saved_report and _reports_view_filename ==
 if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_generating_report):
     _temp_path = Path(_bg_job.get("temp_path", ""))
     _partial_file = _temp_path / "partial_output.json" if _temp_path else None
-    if _partial_file and _partial_file.exists():
+    _partial_rows = []
+    _partial_file_exists = _partial_file and _partial_file.exists()
+    
+    if _partial_file_exists:
         try:
             with open(_partial_file, "r", encoding="utf-8") as f:
                 _partial_rows = json.load(f)
         except Exception:
             _partial_rows = []
-        if not _partial_rows and _viewing_generating_report:
-            st.caption("⏳ Waiting for first batch of data… Click **Refresh status** below to update.")
-            if st.button("🔄 Refresh status", key="bg_job_refresh_wait"):
-                st.rerun()
-        elif _partial_rows:
-            _total_slots = _bg_job.get("total_slots", 0) or 1
-            _processed = _bg_job.get("processed_slots", 0)
-            _pct = _bg_job.get("progress_pct", 0)
-            _current_date = _bg_job.get("current_date", "")
-            _station_bg = _bg_job.get("station_name", "")
-            st.progress(_pct / 100.0)
-            if _current_date:
-                st.caption(f"⏳ Processing day {_current_date} — {len(_partial_rows)} rows so far")
-            else:
-                st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
-            _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
-            for _col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "Diff", "MU", "Sum MU"):
-                if _col in _df_partial.columns:
-                    _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
-            if "DC , Scada Diff (MW)" in _df_partial.columns:
-                _df_partial["DC , Scada Diff (MW)"] = _df_partial["DC , Scada Diff (MW)"].apply(
-                    lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
-                )
-            if "Sum Mus" in _df_partial.columns:
-                _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
-                    lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
-                )
-            # Reorder columns to match expected output format (including hidden marker columns)
-            _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
-            _df_partial = _df_partial[[c for c in _expected_cols if c in _df_partial.columns]]
-            _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
-            st.divider()
-            st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
-            if AGGrid_AVAILABLE:
-                _n_partial = len(_df_partial)
-                _gb = GridOptionsBuilder.from_dataframe(_df_partial)
-                _page_opts = sorted(set([20, 50, 100, 500, _n_partial])) if _n_partial > 0 else [20]
-                _default_ps = _n_partial if _n_partial > 0 else 20
-                _gb.configure_pagination(
-                    paginationAutoPageSize=False,
-                    paginationPageSize=_default_ps,
-                )
-                _gb.configure_grid_options(
-                    paginationPageSizeSelector=_page_opts,
-                    onFirstDataRendered=JsCode(
-                        f"""
-                        function(params) {{
-                            var allVals = ['{PAGE_SIZE_ALL}', '{_n_partial}'];
-                            function replacePageSizeText(root) {{
-                                try {{
-                                    var walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-                                    var n;
-                                    while ((n = walk.nextNode())) {{
-                                        var t = n.textContent.trim();
-                                        if (allVals.indexOf(t) !== -1) n.textContent = 'ALL';
-                                    }}
-                                    if (root.querySelectorAll) root.querySelectorAll('select option').forEach(function(opt) {{
-                                        if (allVals.indexOf(opt.value) !== -1) opt.textContent = 'ALL';
-                                    }});
-                                }} catch (e) {{}}
-                            }}
-                            function run() {{
-                                var el = params.api.getGridElement();
-                                if (el) {{
-                                    var root = el.closest('.ag-root-wrapper') || el.closest('.ag-root') || el;
-                                    if (root) replacePageSizeText(root);
+    
+    if not _partial_rows:
+        # Waiting for first batch - auto-refresh, don't show anything else
+        st.caption("⏳ Waiting for first batch of data…")
+        time.sleep(2)
+        st.rerun()
+        st.stop()  # Safety stop to prevent old content from showing
+    else:
+        _total_slots = _bg_job.get("total_slots", 0) or 1
+        _processed = _bg_job.get("processed_slots", 0)
+        _pct = _bg_job.get("progress_pct", 0)
+        _current_date = _bg_job.get("current_date", "")
+        _station_bg = _bg_job.get("station_name", "")
+        st.progress(_pct / 100.0)
+        if _current_date:
+            st.caption(f"⏳ Processing day {_current_date} — {len(_partial_rows)} rows so far")
+        else:
+            st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
+        _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
+        for _col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "Diff", "MU", "Sum MU"):
+            if _col in _df_partial.columns:
+                _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
+        if "DC , Scada Diff (MW)" in _df_partial.columns:
+            _df_partial["DC , Scada Diff (MW)"] = _df_partial["DC , Scada Diff (MW)"].apply(
+                lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
+            )
+        if "Sum Mus" in _df_partial.columns:
+            _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
+                lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
+            )
+        # Reorder columns to match expected output format (including hidden marker columns)
+        _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
+        _df_partial = _df_partial[[c for c in _expected_cols if c in _df_partial.columns]]
+        _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
+        st.divider()
+        st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
+        if AGGrid_AVAILABLE:
+            _n_partial = len(_df_partial)
+            _gb = GridOptionsBuilder.from_dataframe(_df_partial)
+            _page_opts = sorted(set([20, 50, 100, 500, _n_partial])) if _n_partial > 0 else [20]
+            _default_ps = _n_partial if _n_partial > 0 else 20
+            _gb.configure_pagination(
+                paginationAutoPageSize=False,
+                paginationPageSize=_default_ps,
+            )
+            _gb.configure_grid_options(
+                paginationPageSizeSelector=_page_opts,
+                onFirstDataRendered=JsCode(
+                    f"""
+                    function(params) {{
+                        var allVals = ['{PAGE_SIZE_ALL}', '{_n_partial}'];
+                        function replacePageSizeText(root) {{
+                            try {{
+                                var walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                                var n;
+                                while ((n = walk.nextNode())) {{
+                                    var t = n.textContent.trim();
+                                    if (allVals.indexOf(t) !== -1) n.textContent = 'ALL';
                                 }}
-                                replacePageSizeText(document.body);
-                            }}
-                            setTimeout(run, 100);
-                            setTimeout(run, 500);
+                                if (root.querySelectorAll) root.querySelectorAll('select option').forEach(function(opt) {{
+                                    if (allVals.indexOf(opt.value) !== -1) opt.textContent = 'ALL';
+                                }});
+                            }} catch (e) {{}}
                         }}
-                        """
-                    ),
-                )
-                _gb.configure_side_bar()
-                _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
-                _gb.configure_selection("single")
-                
-                # Cell styling for partial view
-                _date_style = JsCode("""
-                function(params) {
-                    if (params.value && params.value.toString().trim() !== '') {
-                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
-                    }
-                    return null;
+                        function run() {{
+                            var el = params.api.getGridElement();
+                            if (el) {{
+                                var root = el.closest('.ag-root-wrapper') || el.closest('.ag-root') || el;
+                                if (root) replacePageSizeText(root);
+                            }}
+                            replacePageSizeText(document.body);
+                        }}
+                        setTimeout(run, 100);
+                        setTimeout(run, 500);
+                    }}
+                    """
+                ),
+            )
+            _gb.configure_side_bar()
+            _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
+            _gb.configure_selection("single")
+            
+            # Cell styling for partial view
+            _date_style = JsCode("""
+            function(params) {
+                if (params.value && params.value.toString().trim() !== '') {
+                    return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
                 }
-                """)
-                _gb.configure_column("Date", cellStyle=_date_style)
-                
-                _to_style = JsCode("""
-                function(params) {
-                    var rowData = params.data;
-                    var insEnd = rowData['_ins_end'];
-                    if (insEnd === true || insEnd === 1 || insEnd === 'True' || insEnd === 'true' || insEnd === 'TRUE') {
-                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
-                    }
-                    return null;
+                return null;
+            }
+            """)
+            _gb.configure_column("Date", cellStyle=_date_style)
+            
+            _to_style = JsCode("""
+            function(params) {
+                var rowData = params.data;
+                var insEnd = rowData['_ins_end'];
+                if (insEnd === true || insEnd === 1 || insEnd === 'True' || insEnd === 'true' || insEnd === 'TRUE') {
+                    return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
                 }
-                """)
-                _gb.configure_column("To", cellStyle=_to_style)
-                _gb.configure_column("_ins_end", hide=True)
-                
-                AgGrid(
-                    _df_partial,
-                    gridOptions=_gb.build(),
-                    height=table_height(min(_n_partial, 100) if _n_partial > 0 else 20),
-                    width="100%",
-                    theme="streamlit",
-                    update_mode=GridUpdateMode.NO_UPDATE,
-                    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-                    allow_unsafe_jscode=True,
-                )
-            else:
-                st.dataframe(_df_partial, width="stretch", height=table_height(len(_df_partial)), hide_index=True)
-            if st.button("🔄 Refresh status", key="bg_job_refresh_table"):
-                st.rerun()
+                return null;
+            }
+            """)
+            _gb.configure_column("To", cellStyle=_to_style)
+            _gb.configure_column("_ins_end", hide=True)
+            
+            AgGrid(
+                _df_partial,
+                gridOptions=_gb.build(),
+                height=table_height(min(_n_partial, 100) if _n_partial > 0 else 20),
+                width="100%",
+                theme="streamlit",
+                update_mode=GridUpdateMode.NO_UPDATE,
+                data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+                allow_unsafe_jscode=True,
+            )
+        else:
+            st.dataframe(_df_partial, width="stretch", height=table_height(len(_df_partial)), hide_index=True)
+        if st.button("🔄 Refresh status", key="bg_job_refresh_table"):
+            st.rerun()
+        
+        # Auto-refresh while generation is in progress
+        time.sleep(3)
+        st.rerun()
+        st.stop()  # Safety stop to prevent old content from showing
+
 # Show upload/form prompts only when not viewing a report and not in the middle of background generation
 # But don't stop if we have a latest report to show
 _has_reports_to_show = bool(reports_load_index())
