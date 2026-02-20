@@ -6,8 +6,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-HEADERS = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus"]
-COLUMN_WIDTHS = [15, 10, 10, 12, 25, 12, 12, 12]
+HEADERS = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU"]
+COLUMN_WIDTHS = [15, 10, 10, 12, 25, 12, 12, 12, 14, 12, 12, 12]
 PAD = 0
 
 
@@ -77,10 +77,14 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
         sheet.cell(row=out_row, column=start_col + 2).value = row_dict.get("To")
         sheet.cell(row=out_row, column=start_col + 3).value = row_dict.get("DC (MW)")
         sheet.cell(row=out_row, column=start_col + 4).value = row_dict.get("As per SLDC Scada in MW")
-        sheet.cell(row=out_row, column=start_col + 5).value = row_dict.get("Diff (MW)")
+        sheet.cell(row=out_row, column=start_col + 5).value = row_dict.get("DC , Scada Diff (MW)")
         sheet.cell(row=out_row, column=start_col + 6).value = row_dict.get("Mus")
         sheet.cell(row=out_row, column=start_col + 7).value = row_dict.get("Sum Mus")
-        for c in range(8):
+        sheet.cell(row=out_row, column=start_col + 8).value = row_dict.get("MW as per ramp")
+        sheet.cell(row=out_row, column=start_col + 9).value = row_dict.get("Diff")
+        sheet.cell(row=out_row, column=start_col + 10).value = row_dict.get("MU")
+        sheet.cell(row=out_row, column=start_col + 11).value = row_dict.get("Sum MU")
+        for c in range(12):
             sheet.cell(row=out_row, column=start_col + c).border = thin_border
 
     if date_start_row is not None:
@@ -94,7 +98,7 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
             )
 
     last_row = row_idx + len(output_rows) - 1
-    last_content_col = start_col + 7
+    last_content_col = start_col + 11
 
     sheet.freeze_panes = sheet.cell(row=start_data_row, column=start_col).coordinate
     sheet.sheet_view.showGridLines = False

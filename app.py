@@ -18,7 +18,7 @@ import streamlit as st
 
 from background_job import read_job as background_read_job
 from background_job import write_job as background_write_job
-from config import BACKGROUND_JOB_FILE, PARTIAL_OUTPUT_WRITE_INTERVAL, PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
+from config import BACKGROUND_JOB_FILE, PAGE_SIZE_ALL, PARTIAL_OUTPUT_WRITE_INTERVAL, PROCESSING_BATCH_SIZE, REPORTS_DIR, table_height
 from excel_builder import build_report_workbook
 from instructions_parser import extract_stations_and_title
 from reports_store import append_entry as reports_append_entry
@@ -34,7 +34,7 @@ except ImportError:
 
 # Try to import streamlit-aggrid for advanced table features
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
     AGGrid_AVAILABLE = True
 except ImportError:
     AGGrid_AVAILABLE = False
@@ -48,6 +48,7 @@ try:
     # Get the functions we need from find_station_rows
     format_value = fsr.format_value
     slots_15min = fsr.slots_15min
+    time_to_minutes = fsr.time_to_minutes
     convert_date_to_sheet_format = fsr.convert_date_to_sheet_format
     SCADALookupCache = fsr.SCADALookupCache
     find_scada_value = fsr.find_scada_value
@@ -83,6 +84,12 @@ def _run_report_generation_worker(job_data: dict) -> None:
     bd_sheet = job_data.get("bd_sheet") or ""
     scada_column = job_data.get("scada_column") or ""
     report_title = job_data.get("report_title") or "Back Down Calculator"
+    ramp_up_5 = float(job_data.get("ramp_up_5", 15))
+    ramp_up_10 = float(job_data.get("ramp_up_10", 27.5))
+    ramp_up_15 = float(job_data.get("ramp_up_15", 40))
+    ramp_down_5 = float(job_data.get("ramp_down_5", 15))
+    ramp_down_10 = float(job_data.get("ramp_down_10", 27.5))
+    ramp_down_15 = float(job_data.get("ramp_down_15", 40))
     verbose = False
 
     def update_progress(**kwargs):
@@ -131,6 +138,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
 
         from_time_col = to_time_col = date_col = None
         from_date_col = None  # Prefer "From Date" for instruction block date
+        to_load_col = None  # To Load (MW) = floor for MW as per ramp
         for c in range(1, ws.max_column + 1):
             val = (ws.cell(row=header_row, column=c).value or "").strip().lower()
             if "from" in val and "time" in val:
@@ -141,6 +149,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 from_date_col = c
             elif "date" in val and date_col is None:
                 date_col = c
+            elif "to" in val and "load" in val:
+                to_load_col = c
         if from_date_col is not None:
             date_col = from_date_col
 
@@ -168,6 +178,10 @@ def _run_report_generation_worker(job_data: dict) -> None:
         row_idx = start_data_row
         last_progress_update = [0]
         entry_start_idx = 0  # Track start of current instruction entry
+        pending_entry_start_idx = None  # Track start idx for pending Sum Mus calculation
+        prev_instruction_end_time = None  # "HH:MM" of last slot To of previous instruction
+        prev_instruction_end_mw_ramp = None  # last MW as per ramp of previous instruction
+        prev_instruction_date_str = None  # date for gap rows between blocks
 
         def _num_display(val, decimals=2):
             """Format value for DC/SCADA columns: numeric to 2 decimals, else as-is."""
@@ -180,7 +194,6 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 return val
 
         for idx, (row_num, row_data) in enumerate(matches, 1):
-            entry_start_idx = len(output_rows)  # Start of this instruction entry
             if not (from_time_col and to_time_col and from_time_col <= len(row_data) and to_time_col <= len(row_data)):
                 continue
             from_time_val = row_data[from_time_col - 1] if from_time_col > 0 else None
@@ -198,6 +211,149 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 current_date = date_str
                 previous_date_with_data = date_str
                 date_start_row = row_idx
+
+            # Check if there's a gap from previous instruction to this one
+            # Gap info is stored and will be added AFTER the previous instruction's Sum Mus
+            first_slot_from = slots[0][0] if slots else None
+            there_was_gap = (
+                prev_instruction_end_time is not None
+                and first_slot_from is not None
+                and str(prev_instruction_end_time).strip() != str(first_slot_from).strip()
+                and prev_instruction_date_str
+            )
+
+            # Helper for gap processing
+            def _time_to_minutes(t):
+                try:
+                    parts = str(t).strip().split(":")
+                    return int(parts[0]) * 60 + int(parts[1])
+                except:
+                    return 0
+
+            # If there was a pending instruction (not first iteration), add its gap rows and Sum Mus now
+            if pending_entry_start_idx is not None:
+                # Add gap rows from previous instruction end to current instruction start
+                if there_was_gap:
+                    gap_slots = slots_15min(prev_instruction_end_time, from_time_val)
+                    gap_prev_mw = prev_instruction_end_mw_ramp
+                    prev_end_mins = _time_to_minutes(prev_instruction_end_time)
+                    dates_differ = (prev_instruction_date_str != date_str)
+                    last_added_g_to = None
+                    last_added_g_mw = None
+
+                    for g_from, g_to in gap_slots:
+                        g_from_mins = _time_to_minutes(g_from)
+                        if dates_differ:
+                            if g_from_mins < prev_end_mins:
+                                gap_date_lookup = date_str
+                            else:
+                                gap_date_lookup = prev_instruction_date_str
+                        else:
+                            gap_date_lookup = prev_instruction_date_str
+
+                        g_dc = None
+                        if dc_wb and gap_date_lookup:
+                            sheet_name_dc = convert_date_to_sheet_format(gap_date_lookup)
+                            if sheet_name_dc:
+                                g_dc = find_dc_value(dc_wb, sheet_name_dc, g_from, g_to, debug=verbose)
+                        g_scada = None
+                        if scada_cache and gap_date_lookup:
+                            g_scada = find_scada_value(scada_cache, gap_date_lookup, g_from, debug=verbose, show_progress=False)
+                        try:
+                            g_dc_num = float(g_dc) if g_dc is not None else None
+                        except (ValueError, TypeError):
+                            g_dc_num = None
+                        try:
+                            g_scada_num = float(g_scada) if g_scada is not None else None
+                        except (ValueError, TypeError):
+                            g_scada_num = None
+
+                        if gap_prev_mw is not None:
+                            would_be = gap_prev_mw + ramp_up_15
+                            if verbose:
+                                print(f"  [GAP] {g_from}-{g_to}: prev_mw={gap_prev_mw:.2f}, would_be={would_be:.2f}, scada={g_scada_num}, dc={g_dc_num}", file=sys.stderr)
+                            if g_scada_num is not None and would_be > g_scada_num:
+                                if verbose:
+                                    print(f"  [GAP] STOPPING: would_be {would_be:.2f} > scada {g_scada_num}", file=sys.stderr)
+                                break
+                            g_mw_ramp = would_be
+                            if g_dc_num is not None and g_mw_ramp > g_dc_num:
+                                g_mw_ramp = g_dc_num
+                        else:
+                            g_mw_ramp = None
+
+                        gap_prev_mw = g_mw_ramp
+                        # DC , Scada Diff (MW) = DC - Scada
+                        g_diff = round(g_dc_num - g_scada_num, 2) if g_dc_num is not None and g_scada_num is not None else None
+                        g_mus = round(g_diff / 4000, 10) if g_diff is not None else None
+                        # Diff = Scada - MW as per ramp
+                        g_scada_mw_diff = round(g_scada_num - g_mw_ramp, 2) if g_scada_num is not None and g_mw_ramp is not None else None
+                        # MU = Diff/4000 if > 0, else 0
+                        g_mu = round(g_scada_mw_diff / 4000, 10) if g_scada_mw_diff is not None and g_scada_mw_diff / 4000 > 0 else 0
+                        # Gap rows have no Date (continue from previous instruction)
+                        output_rows.append({
+                            "Date": "",
+                            "From": g_from,
+                            "To": g_to,
+                            "DC (MW)": _num_display(g_dc) if g_dc is not None else "",
+                            "As per SLDC Scada in MW": _num_display(g_scada) if g_scada is not None else "",
+                            "MW as per ramp": round(g_mw_ramp, 2) if g_mw_ramp is not None else "",
+                            "DC , Scada Diff (MW)": g_diff if g_diff is not None else "",
+                            "Mus": g_mus if g_mus is not None else "",
+                            "Sum Mus": "",
+                            "Diff": g_scada_mw_diff if g_scada_mw_diff is not None else "",
+                            "MU": g_mu if g_mu is not None else "",
+                            "Sum MU": "",
+                        })
+                        row_idx += 1
+                        last_added_g_to = g_to
+                        last_added_g_mw = g_mw_ramp
+
+                    # Update prev values for continuity with next instruction (use last ADDED row's values)
+                    if last_added_g_to is not None:
+                        prev_instruction_end_time = last_added_g_to
+                        prev_instruction_end_mw_ramp = last_added_g_mw
+
+                # Now add Sum Mus for the previous instruction (including gap rows just added)
+                entry_end_idx = len(output_rows)
+                if entry_end_idx > pending_entry_start_idx:
+                    mus_sum = 0.0
+                    mu_sum = 0.0
+                    for i in range(pending_entry_start_idx, entry_end_idx):
+                        mus_val = output_rows[i].get("Mus")
+                        if mus_val != "" and mus_val is not None:
+                            try:
+                                mus_sum += float(mus_val)
+                            except (TypeError, ValueError):
+                                pass
+                        mu_val = output_rows[i].get("MU")
+                        if mu_val != "" and mu_val is not None:
+                            try:
+                                mu_sum += float(mu_val)
+                            except (TypeError, ValueError):
+                                pass
+                    mus_sum_rounded = round(mus_sum, 3) if mus_sum else 0.0
+                    mu_sum_rounded = round(mu_sum, 3) if mu_sum else 0.0
+                    output_rows.append({
+                        "Date": "", "From": "", "To": "", "DC (MW)": "",
+                        "As per SLDC Scada in MW": "", "MW as per ramp": "",
+                        "DC , Scada Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "", "Sum MU": mu_sum_rounded,
+                    })
+                    row_idx += 1
+
+            # To Load (floor for ramp down) from instruction row
+            to_load = None
+            if to_load_col and to_load_col <= len(row_data):
+                try:
+                    to_load = float(format_value(row_data[to_load_col - 1])) if row_data[to_load_col - 1] else None
+                except (TypeError, ValueError):
+                    to_load = None
+            # Ramp down must not go below 270 (min floor); use To Load from row if higher
+            floor_mw = max(270.0, to_load) if to_load is not None else 270.0
+            prev_slot_mw_ramp = None
+
+            # Start of this instruction's block (gap rows will be added after this instruction, before Sum Mus)
+            entry_start_idx = len(output_rows)
 
             for slot_idx, (slot_from, slot_to) in enumerate(slots):
                 # Show date at start of each instruction entry (first slot of this row only)
@@ -218,30 +374,94 @@ def _run_report_generation_worker(job_data: dict) -> None:
                         scada_found_count += 1
                     else:
                         scada_not_found_count += 1
-                diff_value = None
-                if dc_value is not None and scada_value is not None:
+                # MW as per ramp (rules from docs/MW_as_per_ramp_rules.md)
+                dc_num = None
+                if dc_value is not None:
                     try:
                         dc_num = float(dc_value) if isinstance(dc_value, (int, float, str)) and str(dc_value).strip() else None
-                        scada_num = float(scada_value) if isinstance(scada_value, (int, float, str)) and str(scada_value).strip() else None
-                        if dc_num is not None and scada_num is not None:
-                            diff_value = round(dc_num - scada_num, 2)
                     except (ValueError, TypeError):
                         pass
-                mus_value = None
-                if diff_value is not None:
-                    try:
-                        mus_value = float(diff_value) / 4000
-                    except (TypeError, ValueError):
-                        mus_value = None
+                slot_min = time_to_minutes(slot_from)
+                mw_as_per_ramp = None
+                if slot_idx == 0:
+                    # First slot of instruction block:
+                    # - If continuous with prev (times match) OR gap was filled → use prev_mw - ramp_down
+                    # - If no previous data → use DC - ramp_down (fresh start)
+                    times_match = (
+                        prev_instruction_end_time is not None
+                        and str(slot_from).strip() == str(prev_instruction_end_time).strip()
+                    )
+                    # When gap rows were filled, prev_instruction_end_mw_ramp holds the last gap MW
+                    # and prev_instruction_end_time equals slot_from, so times_match will be True
+                    if times_match and prev_instruction_end_mw_ramp is not None:
+                        # Continuous from previous (either direct or via filled gap rows)
+                        # Apply ramp down from previous MW value
+                        raw = prev_instruction_end_mw_ramp - ramp_down_15
+                        try:
+                            scada_num = float(scada_value) if scada_value is not None else None
+                        except (ValueError, TypeError):
+                            scada_num = None
+                        if scada_num is not None and raw > scada_num:
+                            raw = scada_num
+                        mw_as_per_ramp = max(floor_mw, raw)
+                        if prev_instruction_end_mw_ramp <= floor_mw:
+                            mw_as_per_ramp = floor_mw
+                    else:
+                        # No previous data or times don't match → fresh start from DC - ramp_down
+                        if prev_instruction_end_time is None:
+                            gap_min = 15
+                            if slot_min is not None:
+                                gap_min = slot_min - (slot_min // 15) * 15
+                                if gap_min == 0:
+                                    gap_min = 15
+                        else:
+                            prev_min = time_to_minutes(prev_instruction_end_time)
+                            if prev_min is not None and slot_min is not None:
+                                gap_min = (slot_min - prev_min) % (24 * 60)
+                                if gap_min <= 0:
+                                    gap_min += 24 * 60
+                            else:
+                                gap_min = 15
+                        ramp_down_val = ramp_down_15 if gap_min >= 15 else (ramp_down_10 if gap_min >= 10 else ramp_down_5)
+                        mw_as_per_ramp = (dc_num - ramp_down_val) if dc_num is not None else None
+                else:
+                    # From second slot onward: always ramp down (continuous within block)
+                    if prev_slot_mw_ramp is not None:
+                        mw_as_per_ramp = max(floor_mw, prev_slot_mw_ramp - ramp_down_15)
+                        if prev_slot_mw_ramp <= floor_mw:
+                            mw_as_per_ramp = floor_mw
+                    else:
+                        mw_as_per_ramp = None
+                prev_slot_mw_ramp = mw_as_per_ramp
+                mw_ramp_display = round(mw_as_per_ramp, 2) if mw_as_per_ramp is not None else ""
+                # Parse scada_num for calculations
+                try:
+                    scada_num = float(scada_value) if scada_value is not None else None
+                except (ValueError, TypeError):
+                    scada_num = None
+                # DC , Scada Diff (MW) = DC - Scada
+                diff_value = round(dc_num - scada_num, 2) if dc_num is not None and scada_num is not None else None
+                mus_value = (float(diff_value) / 4000 if diff_value is not None else None) if diff_value is not None else None
+                if diff_value is not None and mus_value is not None:
+                    mus_value = round(mus_value, 10)
+                # Diff = Scada - MW as per ramp
+                scada_mw_diff = round(scada_num - mw_as_per_ramp, 2) if scada_num is not None and mw_as_per_ramp is not None else None
+                # MU = Diff/4000 if > 0, else 0
+                mu_value = round(scada_mw_diff / 4000, 10) if scada_mw_diff is not None and scada_mw_diff / 4000 > 0 else 0
+
                 output_rows.append({
                     "Date": row_date,
                     "From": slot_from,
                     "To": slot_to,
                     "DC (MW)": _num_display(dc_value) if dc_value is not None else "",
                     "As per SLDC Scada in MW": _num_display(scada_value) if scada_value is not None else "",
-                    "Diff (MW)": diff_value if diff_value is not None else "",
+                    "MW as per ramp": mw_ramp_display,
+                    "DC , Scada Diff (MW)": diff_value if diff_value is not None else "",
                     "Mus": mus_value if mus_value is not None else "",
                     "Sum Mus": "",
+                    "Diff": scada_mw_diff if scada_mw_diff is not None else "",
+                    "MU": mu_value if mu_value is not None else "",
+                    "Sum MU": "",
                 })
                 row_idx += 1
                 processed_slots += 1
@@ -260,29 +480,41 @@ def _run_report_generation_worker(job_data: dict) -> None:
                                 json.dump(output_rows, f, default=str, indent=0)
                         except Exception:
                             pass
-            
-            # After processing all slots for this instruction entry, add a separate summary row with sum of Mus
+
+            # End of this instruction: remember last slot for next block and date for gap rows
+            if slots:
+                prev_instruction_end_time = slots[-1][1]
+                prev_instruction_end_mw_ramp = prev_slot_mw_ramp
+                prev_instruction_date_str = date_str
+
+            # Mark this instruction's start for deferred Sum Mus calculation (gap + Sum Mus added at start of next iteration)
+            pending_entry_start_idx = entry_start_idx
+
+        # After loop: add Sum Mus for the last instruction (no more instructions to trigger deferred processing)
+        if pending_entry_start_idx is not None:
             entry_end_idx = len(output_rows)
-            if entry_end_idx > entry_start_idx:
+            if entry_end_idx > pending_entry_start_idx:
                 mus_sum = 0.0
-                for i in range(entry_start_idx, entry_end_idx):
+                mu_sum = 0.0
+                for i in range(pending_entry_start_idx, entry_end_idx):
                     mus_val = output_rows[i].get("Mus")
                     if mus_val != "" and mus_val is not None:
                         try:
                             mus_sum += float(mus_val)
                         except (TypeError, ValueError):
                             pass
+                    mu_val = output_rows[i].get("MU")
+                    if mu_val != "" and mu_val is not None:
+                        try:
+                            mu_sum += float(mu_val)
+                        except (TypeError, ValueError):
+                            pass
                 mus_sum_rounded = round(mus_sum, 3) if mus_sum else 0.0
-                # Append a single row after this instruction block with only Sum Mus filled
+                mu_sum_rounded = round(mu_sum, 3) if mu_sum else 0.0
                 output_rows.append({
-                    "Date": "",
-                    "From": "",
-                    "To": "",
-                    "DC (MW)": "",
-                    "As per SLDC Scada in MW": "",
-                    "Diff (MW)": "",
-                    "Mus": "",
-                    "Sum Mus": mus_sum_rounded,
+                    "Date": "", "From": "", "To": "", "DC (MW)": "",
+                    "As per SLDC Scada in MW": "", "MW as per ramp": "",
+                    "DC , Scada Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "", "Sum MU": mu_sum_rounded,
                 })
 
         wb.close()
@@ -327,6 +559,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
             "date_to": date_to,
             "run_at": datetime.now().isoformat(),
             "row_count": len(output_rows),
+            "total_instructions": len(matches),
         })
 
         update_progress(
@@ -335,6 +568,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
             progress_pct=100,
             processed_slots=processed_slots,
             total_slots=total_slots,
+            total_instructions=len(matches),
             error_message=None,
         )
     except Exception as e:
@@ -842,30 +1076,72 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
             else:
                 st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
             _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
-            for _col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus"):
+            for _col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "Diff", "MU", "Sum MU"):
                 if _col in _df_partial.columns:
                     _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
-            if "Diff (MW)" in _df_partial.columns:
-                _df_partial["Diff (MW)"] = _df_partial["Diff (MW)"].apply(
+            if "DC , Scada Diff (MW)" in _df_partial.columns:
+                _df_partial["DC , Scada Diff (MW)"] = _df_partial["DC , Scada Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
             if "Sum Mus" in _df_partial.columns:
                 _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
+            # Reorder columns to match expected output format
+            _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU"]
+            _df_partial = _df_partial[[c for c in _expected_cols if c in _df_partial.columns]]
             _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
             st.divider()
             st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
             if AGGrid_AVAILABLE:
+                _n_partial = len(_df_partial)
                 _gb = GridOptionsBuilder.from_dataframe(_df_partial)
-                _gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+                _page_opts = sorted(set([20, 50, 100, 500, _n_partial])) if _n_partial > 0 else [20]
+                _default_ps = _n_partial if _n_partial > 0 else 20
+                _gb.configure_pagination(
+                    paginationAutoPageSize=False,
+                    paginationPageSize=_default_ps,
+                )
+                _gb.configure_grid_options(
+                    paginationPageSizeSelector=_page_opts,
+                    onFirstDataRendered=JsCode(
+                        f"""
+                        function(params) {{
+                            var allVals = ['{PAGE_SIZE_ALL}', '{_n_partial}'];
+                            function replacePageSizeText(root) {{
+                                try {{
+                                    var walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                                    var n;
+                                    while ((n = walk.nextNode())) {{
+                                        var t = n.textContent.trim();
+                                        if (allVals.indexOf(t) !== -1) n.textContent = 'ALL';
+                                    }}
+                                    if (root.querySelectorAll) root.querySelectorAll('select option').forEach(function(opt) {{
+                                        if (allVals.indexOf(opt.value) !== -1) opt.textContent = 'ALL';
+                                    }});
+                                }} catch (e) {{}}
+                            }}
+                            function run() {{
+                                var el = params.api.getGridElement();
+                                if (el) {{
+                                    var root = el.closest('.ag-root-wrapper') || el.closest('.ag-root') || el;
+                                    if (root) replacePageSizeText(root);
+                                }}
+                                replacePageSizeText(document.body);
+                            }}
+                            setTimeout(run, 100);
+                            setTimeout(run, 500);
+                        }}
+                        """
+                    ),
+                )
                 _gb.configure_side_bar()
                 _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
                 _gb.configure_selection("single")
                 AgGrid(
                     _df_partial,
                     gridOptions=_gb.build(),
-                    height=table_height(min(len(_df_partial), 20)),
+                    height=table_height(min(_n_partial, 100) if _n_partial > 0 else 20),
                     width="100%",
                     theme="streamlit",
                     update_mode=GridUpdateMode.NO_UPDATE,
@@ -923,10 +1199,19 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
                 st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
                 date_f = _reports_view_entry.get("date_from", "")
                 date_t = _reports_view_entry.get("date_to", "")
+                # Calculate total_days from unique dates in the data
+                _total_days = 0
+                _total_instructions = _reports_view_entry.get("total_instructions", 0)
+                if "Date" in df_report.columns:
+                    _unique_dates = df_report["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique()
+                    _total_days = len([d for d in _unique_dates if d and d.strip()])
+                # If total_instructions not stored, count from Sum Mus rows
+                if not _total_instructions and "Sum Mus" in df_report.columns:
+                    _total_instructions = len(df_report[df_report["Sum Mus"].notna() & (df_report["Sum Mus"] != "")])
                 st.session_state["display_stats"] = {
-                    "total_days": 0,
-                    "total_slots": 0,
-                    "output_rows": _reports_view_entry.get("row_count", 0),
+                    "total_days": _total_days,
+                    "total_instructions": _total_instructions,
+                    "output_rows": _reports_view_entry.get("row_count", 0) or len(df_report),
                 }
                 if date_f and date_t:
                     st.session_state["report_title"] = f"Back Down Report — {date_f} to {date_t}"
@@ -957,17 +1242,20 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             df_output = df_output.copy()
             df_output = df_output.fillna("").replace("None", "")
             # Make numeric columns Arrow-compatible (float; empty/invalid -> NaN)
-            for col in ("DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus"):
+            for col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "Diff", "MU", "Sum MU"):
                 if col in df_output.columns:
                     df_output[col] = pd.to_numeric(df_output[col], errors="coerce")
-            if "Diff (MW)" in df_output.columns:
-                df_output["Diff (MW)"] = df_output["Diff (MW)"].apply(
+            if "DC , Scada Diff (MW)" in df_output.columns:
+                df_output["DC , Scada Diff (MW)"] = df_output["DC , Scada Diff (MW)"].apply(
                     lambda x: round(x, 2) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
             if "Sum Mus" in df_output.columns:
                 df_output["Sum Mus"] = df_output["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
+            # Reorder columns to match expected output format
+            expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU"]
+            df_output = df_output[[c for c in expected_cols if c in df_output.columns]]
         
         processing = st.session_state.get('processing_in_progress', False)
         
@@ -991,7 +1279,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 with col1:
                     st.metric("Total Days", stats.get('total_days', 0))
                 with col2:
-                    st.metric("Total Slots", stats.get('total_slots', 0))
+                    st.metric("Total Instructions", stats.get('total_instructions', 0))
                 with col3:
                     st.metric("Output Rows", stats.get('output_rows', 0))
                 if st.session_state.get("reports_view_active"):
@@ -1033,11 +1321,35 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             st.divider()
             st.header(f"📊 {table_title}")
             
-            # Search and Download (same row)
+            # Prepare day filter options first
+            day_idx_key = f"{output_data_key}_day_idx"
+            available_dates = []
+            if "Date" in df_output.columns:
+                available_dates = df_output["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique().tolist()
+                available_dates = [d for d in available_dates if d and d.strip()]
+                try:
+                    available_dates = sorted(available_dates, key=lambda x: datetime.strptime(x, "%d-%b-%Y"))
+                except Exception:
+                    available_dates = sorted(available_dates)
+            
+            day_options = ["All Days"] + available_dates if available_dates else ["All Days"]
+            current_idx = st.session_state.get(day_idx_key, 0)
+            if current_idx >= len(day_options):
+                current_idx = 0
+            
+            # Sync selectbox value with index
+            if "day_selectbox" not in st.session_state:
+                st.session_state["day_selectbox"] = day_options[current_idx]
+            elif st.session_state.get("day_selectbox") != day_options[current_idx]:
+                st.session_state["day_selectbox"] = day_options[current_idx]
+            
+            # Search, Day Filter with Prev/Next, Download - all in same row
             search_key = f"{output_data_key}_search"
             rows_key = f"{output_data_key}_rows_per_page"
             page_key = f"{output_data_key}_page"
-            col_search, col_download = st.columns([3, 1])
+            
+            col_search, col_prev, col_day, col_next, col_download = st.columns([3, 0.5, 2, 0.5, 1])
+            
             with col_search:
                 current_search = st.session_state.get(search_key, "")
                 search_term = st.text_input(
@@ -1047,12 +1359,41 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                     help="Filter rows by searching across all columns",
                     key=search_key
                 )
-            with col_download:
-                # Spacer to align Download button with Search input (match label height)
-                st.markdown(
-                    '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;">&nbsp;</div>',
-                    unsafe_allow_html=True
+            
+            with col_prev:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                prev_disabled = current_idx <= 1
+                def go_prev():
+                    new_idx = max(1, st.session_state.get(day_idx_key, 0) - 1)
+                    st.session_state[day_idx_key] = new_idx
+                    st.session_state["day_selectbox"] = day_options[new_idx]
+                st.button("◀", key="day_prev_btn", disabled=prev_disabled, use_container_width=True, on_click=go_prev)
+            
+            with col_day:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                def on_day_change():
+                    selected = st.session_state["day_selectbox"]
+                    st.session_state[day_idx_key] = day_options.index(selected)
+                selected_day = st.selectbox(
+                    "📅 Filter by Day",
+                    options=day_options,
+                    key="day_selectbox",
+                    on_change=on_day_change,
+                    label_visibility="collapsed"
                 )
+                current_idx = day_options.index(selected_day)
+            
+            with col_next:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                next_disabled = current_idx >= len(day_options) - 1
+                def go_next():
+                    new_idx = min(len(day_options) - 1, st.session_state.get(day_idx_key, 0) + 1)
+                    st.session_state[day_idx_key] = new_idx
+                    st.session_state["day_selectbox"] = day_options[new_idx]
+                st.button("▶", key="day_next_btn", disabled=next_disabled, use_container_width=True, on_click=go_next)
+            
+            with col_download:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
                 viewing_saved = st.session_state.get("reports_view_active")
                 if viewing_saved:
                     report_path = REPORTS_DIR / viewing_saved
@@ -1061,11 +1402,11 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                             with open(report_path, "rb") as f:
                                 file_data = f.read()
                             st.download_button(
-                                label="📥 Download Output File",
+                                label="📥 Download",
                                 data=file_data,
                                 file_name=viewing_saved,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                width='stretch',
+                                use_container_width=True,
                                 key="download_button_output"
                             )
                         except Exception:
@@ -1074,11 +1415,11 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                     file_data = st.session_state['last_output_file_data']
                     download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                     st.download_button(
-                        label="📥 Download Output File",
+                        label="📥 Download",
                         data=file_data,
                         file_name=download_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width='stretch',
+                        use_container_width=True,
                         key="download_button_output"
                     )
                 elif 'last_output_path' in st.session_state:
@@ -1089,31 +1430,79 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                                 file_data = f.read()
                             download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                             st.download_button(
-                                label="📥 Download Output File",
+                                label="📥 Download",
                                 data=file_data,
                                 file_name=download_filename,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                width='stretch',
+                                use_container_width=True,
                                 key="download_button_output"
                             )
                         except Exception:
                             pass
             
+            # Apply day filter
+            if available_dates and selected_day and selected_day != "All Days":
+                # Filter rows where Date matches OR Date is empty (continuation rows belong to previous date)
+                # First, forward-fill dates to assign empty rows to their parent date
+                df_with_dates = df_output.copy()
+                df_with_dates["_date_filled"] = df_with_dates["Date"].replace("", pd.NA).ffill()
+                df_day_filtered = df_with_dates[df_with_dates["_date_filled"] == selected_day].drop(columns=["_date_filled"])
+            else:
+                df_day_filtered = df_output.copy()
+            
             # Apply search filter
             if search_term:
-                mask = df_output.astype(str).apply(
+                mask = df_day_filtered.astype(str).apply(
                     lambda x: x.str.contains(search_term, case=False, na=False)
                 ).any(axis=1)
-                df_filtered = df_output[mask].copy()
+                df_filtered = df_day_filtered[mask].copy()
             else:
-                df_filtered = df_output.copy()
+                df_filtered = df_day_filtered.copy()
             
             total_rows = len(df_filtered)
             
             if AGGrid_AVAILABLE:
-                # Use AgGrid: pass full data; table has built-in pagination (no "Rows per page" or our page nav)
+                # Page size options: 20, 50, 100, 500, and All (show all = total_rows); default All; display "ALL" in selector
                 gb = GridOptionsBuilder.from_dataframe(df_filtered)
-                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+                page_size_options = sorted(set([20, 50, 100, 500, total_rows])) if total_rows > 0 else [20]
+                default_page_size = total_rows if total_rows > 0 else 20
+                gb.configure_pagination(
+                    paginationAutoPageSize=False,
+                    paginationPageSize=default_page_size,
+                )
+                gb.configure_grid_options(
+                    paginationPageSizeSelector=page_size_options,
+                    onFirstDataRendered=JsCode(
+                        f"""
+                        function(params) {{
+                            var allVals = ['{PAGE_SIZE_ALL}', '{total_rows}'];
+                            function replacePageSizeText(root) {{
+                                try {{
+                                    var walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                                    var n;
+                                    while ((n = walk.nextNode())) {{
+                                        var t = n.textContent.trim();
+                                        if (allVals.indexOf(t) !== -1) n.textContent = 'ALL';
+                                    }}
+                                    if (root.querySelectorAll) root.querySelectorAll('select option').forEach(function(opt) {{
+                                        if (allVals.indexOf(opt.value) !== -1) opt.textContent = 'ALL';
+                                    }});
+                                }} catch (e) {{}}
+                            }}
+                            function run() {{
+                                var el = params.api.getGridElement();
+                                if (el) {{
+                                    var root = el.closest('.ag-root-wrapper') || el.closest('.ag-root') || el;
+                                    if (root) replacePageSizeText(root);
+                                }}
+                                replacePageSizeText(document.body);
+                            }}
+                            setTimeout(run, 100);
+                            setTimeout(run, 500);
+                        }}
+                        """
+                    ),
+                )
                 gb.configure_side_bar()
                 gb.configure_default_column(
                     sortable=True,
@@ -1123,11 +1512,12 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 )
                 gb.configure_selection('single')
                 gridOptions = gb.build()
-                
+                # Height: allow more rows when default is "all" (cap at 100 rows height for viewport)
+                _display_rows = min(total_rows, 100) if total_rows > 0 else 20
                 AgGrid(
                     df_filtered,
                     gridOptions=gridOptions,
-                    height=table_height(min(len(df_filtered), 20)),
+                    height=table_height(_display_rows),
                     width='100%',
                     theme='streamlit',
                     update_mode=GridUpdateMode.NO_UPDATE,

@@ -18,6 +18,7 @@ TABLE_ROW_PX = 35
 TABLE_HEADER_PX = 40
 TABLE_MIN_HEIGHT = 200
 TABLE_MAX_HEIGHT = 500
+PAGE_SIZE_ALL = "ALL"  # Label for "show all rows" option in pagination
 
 
 def table_height(row_count: int) -> int:
