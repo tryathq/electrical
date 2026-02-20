@@ -105,3 +105,4 @@ Desktop.ini
 # Test files
 test_output/
 test_data/
+background_job.json
