@@ -898,15 +898,44 @@ with st.sidebar:
         data_only = False
         verbose = False
         
-        # Generate button at bottom of sidebar
+        # Generate button at bottom of sidebar - enabled only when all required fields are filled
         st.divider()
         _bg_status_sidebar = _cached_bg_job.get("status") if _cached_bg_job else None
-        if _bg_status_sidebar != "running":
+        
+        # Check all required fields
+        _all_fields_filled = (
+            instructions_file is not None
+            and station_name and str(station_name).strip()
+            and dc_file is not None
+            and bd_folder_path and str(bd_folder_path).strip()
+            and scada_column and str(scada_column).strip()
+            and bd_sheet and str(bd_sheet).strip()
+        )
+        
+        if _bg_status_sidebar == "running":
+            st.button("⏳ Generating...", type="secondary", use_container_width=True, disabled=True, key="sidebar_generate_disabled")
+        elif not _all_fields_filled:
+            st.button("🚀 Generate Report", type="primary", use_container_width=True, disabled=True, key="sidebar_generate_btn_disabled")
+            # Show which fields are missing
+            _missing = []
+            if instructions_file is None:
+                _missing.append("Instructions File")
+            if not station_name or not str(station_name).strip():
+                _missing.append("Station Name")
+            if dc_file is None:
+                _missing.append("DC File")
+            if not bd_folder_path or not str(bd_folder_path).strip():
+                _missing.append("BD Folder Path")
+            if not bd_sheet or not str(bd_sheet).strip():
+                _missing.append("BD Sheet Name")
+            if not scada_column or not str(scada_column).strip():
+                _missing.append("SCADA Column")
+            if _missing:
+                st.caption(f"⚠️ Missing: {', '.join(_missing)}")
+        else:
             if st.button("🚀 Generate Report", type="primary", use_container_width=True, key="sidebar_generate_btn"):
                 st.session_state["_sidebar_generate_clicked"] = True
                 st.rerun()
-        else:
-            st.button("⏳ Generating...", type="secondary", use_container_width=True, disabled=True, key="sidebar_generate_disabled")
     else:
         # Reports: show list of saved reports in sidebar; selecting one shows it on the right
         instructions_file = None
