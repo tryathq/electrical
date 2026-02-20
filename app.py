@@ -1310,11 +1310,35 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             st.divider()
             st.header(f"📊 {table_title}")
             
-            # Search and Download (same row)
+            # Prepare day filter options first
+            day_idx_key = f"{output_data_key}_day_idx"
+            available_dates = []
+            if "Date" in df_output.columns:
+                available_dates = df_output["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique().tolist()
+                available_dates = [d for d in available_dates if d and d.strip()]
+                try:
+                    available_dates = sorted(available_dates, key=lambda x: datetime.strptime(x, "%d-%b-%Y"))
+                except Exception:
+                    available_dates = sorted(available_dates)
+            
+            day_options = ["All Days"] + available_dates if available_dates else ["All Days"]
+            current_idx = st.session_state.get(day_idx_key, 0)
+            if current_idx >= len(day_options):
+                current_idx = 0
+            
+            # Sync selectbox value with index
+            if "day_selectbox" not in st.session_state:
+                st.session_state["day_selectbox"] = day_options[current_idx]
+            elif st.session_state.get("day_selectbox") != day_options[current_idx]:
+                st.session_state["day_selectbox"] = day_options[current_idx]
+            
+            # Search, Day Filter with Prev/Next, Download - all in same row
             search_key = f"{output_data_key}_search"
             rows_key = f"{output_data_key}_rows_per_page"
             page_key = f"{output_data_key}_page"
-            col_search, col_download = st.columns([3, 1])
+            
+            col_search, col_prev, col_day, col_next, col_download = st.columns([3, 0.5, 2, 0.5, 1])
+            
             with col_search:
                 current_search = st.session_state.get(search_key, "")
                 search_term = st.text_input(
@@ -1324,12 +1348,41 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                     help="Filter rows by searching across all columns",
                     key=search_key
                 )
-            with col_download:
-                # Spacer to align Download button with Search input (match label height)
-                st.markdown(
-                    '<div style="font-size: 14px; font-weight: 500; color: rgb(49, 51, 63); margin-bottom: 0.25rem; min-height: 1.25rem;">&nbsp;</div>',
-                    unsafe_allow_html=True
+            
+            with col_prev:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                prev_disabled = current_idx <= 1
+                def go_prev():
+                    new_idx = max(1, st.session_state.get(day_idx_key, 0) - 1)
+                    st.session_state[day_idx_key] = new_idx
+                    st.session_state["day_selectbox"] = day_options[new_idx]
+                st.button("◀", key="day_prev_btn", disabled=prev_disabled, use_container_width=True, on_click=go_prev)
+            
+            with col_day:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                def on_day_change():
+                    selected = st.session_state["day_selectbox"]
+                    st.session_state[day_idx_key] = day_options.index(selected)
+                selected_day = st.selectbox(
+                    "📅 Filter by Day",
+                    options=day_options,
+                    key="day_selectbox",
+                    on_change=on_day_change,
+                    label_visibility="collapsed"
                 )
+                current_idx = day_options.index(selected_day)
+            
+            with col_next:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                next_disabled = current_idx >= len(day_options) - 1
+                def go_next():
+                    new_idx = min(len(day_options) - 1, st.session_state.get(day_idx_key, 0) + 1)
+                    st.session_state[day_idx_key] = new_idx
+                    st.session_state["day_selectbox"] = day_options[new_idx]
+                st.button("▶", key="day_next_btn", disabled=next_disabled, use_container_width=True, on_click=go_next)
+            
+            with col_download:
+                st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
                 viewing_saved = st.session_state.get("reports_view_active")
                 if viewing_saved:
                     report_path = REPORTS_DIR / viewing_saved
@@ -1338,11 +1391,11 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                             with open(report_path, "rb") as f:
                                 file_data = f.read()
                             st.download_button(
-                                label="📥 Download Output File",
+                                label="📥 Download",
                                 data=file_data,
                                 file_name=viewing_saved,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                width='stretch',
+                                use_container_width=True,
                                 key="download_button_output"
                             )
                         except Exception:
@@ -1351,11 +1404,11 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                     file_data = st.session_state['last_output_file_data']
                     download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                     st.download_button(
-                        label="📥 Download Output File",
+                        label="📥 Download",
                         data=file_data,
                         file_name=download_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width='stretch',
+                        use_container_width=True,
                         key="download_button_output"
                     )
                 elif 'last_output_path' in st.session_state:
@@ -1366,24 +1419,34 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                                 file_data = f.read()
                             download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                             st.download_button(
-                                label="📥 Download Output File",
+                                label="📥 Download",
                                 data=file_data,
                                 file_name=download_filename,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                width='stretch',
+                                use_container_width=True,
                                 key="download_button_output"
                             )
                         except Exception:
                             pass
             
+            # Apply day filter
+            if available_dates and selected_day and selected_day != "All Days":
+                # Filter rows where Date matches OR Date is empty (continuation rows belong to previous date)
+                # First, forward-fill dates to assign empty rows to their parent date
+                df_with_dates = df_output.copy()
+                df_with_dates["_date_filled"] = df_with_dates["Date"].replace("", pd.NA).ffill()
+                df_day_filtered = df_with_dates[df_with_dates["_date_filled"] == selected_day].drop(columns=["_date_filled"])
+            else:
+                df_day_filtered = df_output.copy()
+            
             # Apply search filter
             if search_term:
-                mask = df_output.astype(str).apply(
+                mask = df_day_filtered.astype(str).apply(
                     lambda x: x.str.contains(search_term, case=False, na=False)
                 ).any(axis=1)
-                df_filtered = df_output[mask].copy()
+                df_filtered = df_day_filtered[mask].copy()
             else:
-                df_filtered = df_output.copy()
+                df_filtered = df_day_filtered.copy()
             
             total_rows = len(df_filtered)
             
