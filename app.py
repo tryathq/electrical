@@ -285,6 +285,10 @@ def _run_report_generation_worker(job_data: dict) -> None:
                         gap_prev_mw = g_mw_ramp
                         g_diff = round(g_dc_num - g_mw_ramp, 2) if g_dc_num is not None and g_mw_ramp is not None else None
                         g_mus = round(g_diff / 4000, 10) if g_diff is not None else None
+                        # Diff = Scada - MW as per ramp
+                        g_scada_mw_diff = round(g_scada_num - g_mw_ramp, 2) if g_scada_num is not None and g_mw_ramp is not None else None
+                        # MU = Diff/4000 if > 0, else 0
+                        g_mu = round(g_scada_mw_diff / 4000, 10) if g_scada_mw_diff is not None and g_scada_mw_diff / 4000 > 0 else 0
                         # Gap rows have no Date (continue from previous instruction)
                         output_rows.append({
                             "Date": "",
@@ -296,6 +300,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                             "Diff (MW)": g_diff if g_diff is not None else "",
                             "Mus": g_mus if g_mus is not None else "",
                             "Sum Mus": "",
+                            "Diff": g_scada_mw_diff if g_scada_mw_diff is not None else "",
+                            "MU": g_mu if g_mu is not None else "",
                         })
                         row_idx += 1
                         last_added_g_to = g_to
@@ -321,7 +327,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     output_rows.append({
                         "Date": "", "From": "", "To": "", "DC (MW)": "",
                         "As per SLDC Scada in MW": "", "MW as per ramp": "",
-                        "Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded,
+                        "Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "",
                     })
                     row_idx += 1
 
@@ -423,6 +429,14 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 mus_value = (float(diff_value) / 4000 if diff_value is not None else None) if diff_value is not None else None
                 if diff_value is not None and mus_value is not None:
                     mus_value = round(mus_value, 10)
+                # Diff = Scada - MW as per ramp
+                try:
+                    scada_num = float(scada_value) if scada_value is not None else None
+                except (ValueError, TypeError):
+                    scada_num = None
+                scada_mw_diff = round(scada_num - mw_as_per_ramp, 2) if scada_num is not None and mw_as_per_ramp is not None else None
+                # MU = Diff/4000 if > 0, else 0
+                mu_value = round(scada_mw_diff / 4000, 10) if scada_mw_diff is not None and scada_mw_diff / 4000 > 0 else 0
 
                 output_rows.append({
                     "Date": row_date,
@@ -434,6 +448,8 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "Diff (MW)": diff_value if diff_value is not None else "",
                     "Mus": mus_value if mus_value is not None else "",
                     "Sum Mus": "",
+                    "Diff": scada_mw_diff if scada_mw_diff is not None else "",
+                    "MU": mu_value if mu_value is not None else "",
                 })
                 row_idx += 1
                 processed_slots += 1
@@ -478,7 +494,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 output_rows.append({
                     "Date": "", "From": "", "To": "", "DC (MW)": "",
                     "As per SLDC Scada in MW": "", "MW as per ramp": "",
-                    "Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded,
+                    "Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "",
                 })
 
         wb.close()
@@ -1038,7 +1054,7 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
             else:
                 st.caption(f"⏳ Processing... {len(_partial_rows)} rows so far")
             _df_partial = pd.DataFrame(_partial_rows).fillna("").replace("None", "")
-            for _col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "Diff (MW)", "Mus", "Sum Mus"):
+            for _col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "Diff (MW)", "Mus", "Sum Mus", "Diff", "MU"):
                 if _col in _df_partial.columns:
                     _df_partial[_col] = pd.to_numeric(_df_partial[_col], errors="coerce")
             if "Diff (MW)" in _df_partial.columns:
@@ -1049,6 +1065,9 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
                 _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
+            # Reorder columns to match expected output format
+            _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU"]
+            _df_partial = _df_partial[[c for c in _expected_cols if c in _df_partial.columns]]
             _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
             st.divider()
             st.header(f"📊 {' '.join(_title_parts)} — ⏳ generating…")
@@ -1192,7 +1211,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             df_output = df_output.copy()
             df_output = df_output.fillna("").replace("None", "")
             # Make numeric columns Arrow-compatible (float; empty/invalid -> NaN)
-            for col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "Diff (MW)", "Mus", "Sum Mus"):
+            for col in ("DC (MW)", "As per SLDC Scada in MW", "MW as per ramp", "Diff (MW)", "Mus", "Sum Mus", "Diff", "MU"):
                 if col in df_output.columns:
                     df_output[col] = pd.to_numeric(df_output[col], errors="coerce")
             if "Diff (MW)" in df_output.columns:
@@ -1203,6 +1222,9 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 df_output["Sum Mus"] = df_output["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
+            # Reorder columns to match expected output format
+            expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU"]
+            df_output = df_output[[c for c in expected_cols if c in df_output.columns]]
         
         processing = st.session_state.get('processing_in_progress', False)
         
