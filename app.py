@@ -70,6 +70,114 @@ def _parse_float(val, default: float) -> float:
         return default
 
 
+def _reconstruct_ins_end_marker(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reconstruct the _ins_end marker for DataFrames loaded from Excel.
+    If _ins_end column exists (from saved Excel), convert string values to boolean.
+    Otherwise, try to detect instruction ends from the data pattern.
+    """
+    if "_ins_end" in df.columns:
+        # Convert string values ("TRUE"/"FALSE") to boolean
+        df = df.copy()
+        df["_ins_end"] = df["_ins_end"].apply(
+            lambda x: True if str(x).upper() == "TRUE" else False
+        )
+        return df
+    
+    df = df.copy()
+    df["_ins_end"] = False
+    
+    if "From" not in df.columns or "To" not in df.columns or "Date" not in df.columns:
+        return df
+    
+    n = len(df)
+    for i in range(n):
+        row = df.iloc[i]
+        to_val = str(row.get("To", "")).strip() if pd.notna(row.get("To")) else ""
+        from_val = str(row.get("From", "")).strip() if pd.notna(row.get("From")) else ""
+        
+        # Skip rows without From/To (Sum Mus rows)
+        if not to_val or not from_val:
+            continue
+        
+        # Check if next row starts a new instruction (has Date value)
+        if i + 1 < n:
+            next_row = df.iloc[i + 1]
+            next_date = str(next_row.get("Date", "")).strip() if pd.notna(next_row.get("Date")) else ""
+            next_from = str(next_row.get("From", "")).strip() if pd.notna(next_row.get("From")) else ""
+            
+            # Next row has a Date = new instruction starts
+            # The row BEFORE next_date is either instruction end or gap end
+            # We need to find the actual instruction end (where gap starts, if any)
+            if next_date:
+                # Look backwards from current row to find where instruction ends
+                # Instruction end is where To time matches next_date row's From time
+                # OR where there's a discontinuity (gap starts)
+                
+                # Walk backwards to find first row of current block (has Date or follows Sum Mus)
+                block_start_idx = i
+                for j in range(i, -1, -1):
+                    check_row = df.iloc[j]
+                    check_date = str(check_row.get("Date", "")).strip() if pd.notna(check_row.get("Date")) else ""
+                    check_from = str(check_row.get("From", "")).strip() if pd.notna(check_row.get("From")) else ""
+                    if check_date:
+                        block_start_idx = j
+                        break
+                    if not check_from:  # Hit Sum Mus row
+                        block_start_idx = j + 1
+                        break
+                
+                # Now scan forward from block_start to find where To doesn't match next From
+                # That's where instruction ends and gap begins
+                found_gap_start = False
+                for j in range(block_start_idx, i):
+                    curr_to = str(df.iloc[j].get("To", "")).strip() if pd.notna(df.iloc[j].get("To")) else ""
+                    next_f = str(df.iloc[j + 1].get("From", "")).strip() if pd.notna(df.iloc[j + 1].get("From")) else ""
+                    if curr_to and next_f and curr_to != next_f:
+                        # Gap found - row j is instruction end
+                        df.iloc[j, df.columns.get_loc("_ins_end")] = True
+                        found_gap_start = True
+                        break
+                
+                # If no gap found, the row before next Date is instruction end
+                if not found_gap_start:
+                    df.iloc[i, df.columns.get_loc("_ins_end")] = True
+                continue
+            
+            # Next row is Sum Mus row (no From value)
+            if not next_from:
+                # Similar logic: find where gap starts within this block
+                block_start_idx = i
+                for j in range(i, -1, -1):
+                    check_row = df.iloc[j]
+                    check_date = str(check_row.get("Date", "")).strip() if pd.notna(check_row.get("Date")) else ""
+                    check_from = str(check_row.get("From", "")).strip() if pd.notna(check_row.get("From")) else ""
+                    if check_date:
+                        block_start_idx = j
+                        break
+                    if not check_from:
+                        block_start_idx = j + 1
+                        break
+                
+                found_gap_start = False
+                for j in range(block_start_idx, i):
+                    curr_to = str(df.iloc[j].get("To", "")).strip() if pd.notna(df.iloc[j].get("To")) else ""
+                    next_f = str(df.iloc[j + 1].get("From", "")).strip() if pd.notna(df.iloc[j + 1].get("From")) else ""
+                    if curr_to and next_f and curr_to != next_f:
+                        df.iloc[j, df.columns.get_loc("_ins_end")] = True
+                        found_gap_start = True
+                        break
+                
+                if not found_gap_start:
+                    df.iloc[i, df.columns.get_loc("_ins_end")] = True
+        else:
+            # Last row in dataframe
+            if to_val:
+                df.iloc[i, df.columns.get_loc("_ins_end")] = True
+    
+    return df
+
+
 def _run_report_generation_worker(job_data: dict) -> None:
     """Run full report generation in a background thread. Updates job state file for progress."""
     temp_path = Path(job_data["temp_path"])
@@ -304,6 +412,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                             "Diff": g_scada_mw_diff if g_scada_mw_diff is not None else "",
                             "MU": g_mu if g_mu is not None else "",
                             "Sum MU": "",
+                            "_ins_end": False,  # Gap rows are not instruction ends
                         })
                         row_idx += 1
                         last_added_g_to = g_to
@@ -338,6 +447,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                         "Date": "", "From": "", "To": "", "DC (MW)": "",
                         "As per SLDC Scada in MW": "", "MW as per ramp": "",
                         "DC , Scada Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "", "Sum MU": mu_sum_rounded,
+                        "_ins_end": False,  # Sum rows are not instruction ends
                     })
                     row_idx += 1
 
@@ -449,6 +559,9 @@ def _run_report_generation_worker(job_data: dict) -> None:
                 # MU = Diff/4000 if > 0, else 0
                 mu_value = round(scada_mw_diff / 4000, 10) if scada_mw_diff is not None and scada_mw_diff / 4000 > 0 else 0
 
+                # Mark this row as instruction end if it's the last slot of the instruction
+                is_instruction_end = (slot_to == slots[-1][1])
+                
                 output_rows.append({
                     "Date": row_date,
                     "From": slot_from,
@@ -462,6 +575,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "Diff": scada_mw_diff if scada_mw_diff is not None else "",
                     "MU": mu_value if mu_value is not None else "",
                     "Sum MU": "",
+                    "_ins_end": is_instruction_end,  # Hidden marker for styling
                 })
                 row_idx += 1
                 processed_slots += 1
@@ -515,6 +629,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
                     "Date": "", "From": "", "To": "", "DC (MW)": "",
                     "As per SLDC Scada in MW": "", "MW as per ramp": "",
                     "DC , Scada Diff (MW)": "", "Mus": "", "Sum Mus": mus_sum_rounded, "Diff": "", "MU": "", "Sum MU": mu_sum_rounded,
+                    "_ins_end": False,  # Sum rows are not instruction ends
                 })
 
         wb.close()
@@ -1072,6 +1187,7 @@ if _status in ("running", "done", "error"):
                 if _done_report_path.exists():
                     try:
                         _done_df = pd.read_excel(_done_report_path, engine="openpyxl")
+                        _done_df = _reconstruct_ins_end_marker(_done_df)
                         _done_report_key = f"output_data_home_{_done_filename}"
                         st.session_state[_done_report_key] = _done_df
                         st.session_state["display_output_data_key"] = _done_report_key
@@ -1149,8 +1265,8 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
                 _df_partial["Sum Mus"] = _df_partial["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
-            # Reorder columns to match expected output format
-            _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU"]
+            # Reorder columns to match expected output format (including hidden marker columns)
+            _expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
             _df_partial = _df_partial[[c for c in _expected_cols if c in _df_partial.columns]]
             _title_parts = ["Calculation sheet for BD and non compliance of", _station_bg or "…"]
             st.divider()
@@ -1200,6 +1316,31 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
                 _gb.configure_side_bar()
                 _gb.configure_default_column(sortable=True, filterable=True, resizable=True, editable=False)
                 _gb.configure_selection("single")
+                
+                # Cell styling for partial view
+                _date_style = JsCode("""
+                function(params) {
+                    if (params.value && params.value.toString().trim() !== '') {
+                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
+                    }
+                    return null;
+                }
+                """)
+                _gb.configure_column("Date", cellStyle=_date_style)
+                
+                _to_style = JsCode("""
+                function(params) {
+                    var rowData = params.data;
+                    var insEnd = rowData['_ins_end'];
+                    if (insEnd === true || insEnd === 1 || insEnd === 'True' || insEnd === 'true' || insEnd === 'TRUE') {
+                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
+                    }
+                    return null;
+                }
+                """)
+                _gb.configure_column("To", cellStyle=_to_style)
+                _gb.configure_column("_ins_end", hide=True)
+                
                 AgGrid(
                     _df_partial,
                     gridOptions=_gb.build(),
@@ -1264,6 +1405,7 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
         if report_path.exists():
             try:
                 df_report = pd.read_excel(report_path, engine="openpyxl")
+                df_report = _reconstruct_ins_end_marker(df_report)
                 st.session_state[report_key] = df_report
                 st.session_state["display_output_data_key"] = report_key
                 st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
@@ -1328,6 +1470,7 @@ if _is_home_page and not _showing_bg_job_table and _status not in ("running", "d
                 if _latest_path.exists():
                     try:
                         _latest_df = pd.read_excel(_latest_path, engine="openpyxl")
+                        _latest_df = _reconstruct_ins_end_marker(_latest_df)
                         _latest_key = f"output_data_latest_{_latest_filename}"
                         st.session_state[_latest_key] = _latest_df
                         st.session_state["display_output_data_key"] = _latest_key
@@ -1357,7 +1500,10 @@ if _is_home_page and not _showing_bg_job_table and _status not in ("running", "d
                     except Exception:
                         pass
 
-if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
+# Don't show old report when new generation is running (unless viewing a specific saved report)
+_hide_old_report_during_generation = _status == "running" and not _viewing_saved_report
+
+if 'display_output_data_key' in st.session_state and not _showing_bg_job_table and not _hide_old_report_during_generation:
     output_data_key = st.session_state['display_output_data_key']
     station_name_display = st.session_state.get('display_station_name', '')
     
@@ -1378,8 +1524,8 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 df_output["Sum Mus"] = df_output["Sum Mus"].apply(
                     lambda x: round(x, 3) if isinstance(x, (int, float)) and pd.notna(x) else x
                 )
-            # Reorder columns to match expected output format
-            expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU"]
+            # Reorder columns to match expected output format (including hidden marker columns)
+            expected_cols = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
             df_output = df_output[[c for c in expected_cols if c in df_output.columns]]
         
         processing = st.session_state.get('processing_in_progress', False)
@@ -1650,6 +1796,38 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                     editable=False
                 )
                 gb.configure_selection('single')
+                
+                # Cell styling: Yellow highlight for Date (when not empty) and To (end of instruction)
+                # Date column: highlight yellow when cell has a value (first row of each date)
+                date_cell_style = JsCode("""
+                function(params) {
+                    if (params.value && params.value.toString().trim() !== '') {
+                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
+                    }
+                    return null;
+                }
+                """)
+                gb.configure_column("Date", cellStyle=date_cell_style)
+                
+                # To column: highlight yellow when it's the end of an instruction (from input file)
+                # Uses the hidden _ins_end marker set during data generation
+                to_cell_style = JsCode("""
+                function(params) {
+                    var rowData = params.data;
+                    var insEnd = rowData['_ins_end'];
+                    // Highlight if this row is marked as instruction end
+                    // Handle various data type representations of boolean true
+                    if (insEnd === true || insEnd === 1 || insEnd === 'True' || insEnd === 'true' || insEnd === 'TRUE') {
+                        return {'backgroundColor': '#FFFF00', 'fontWeight': 'bold'};
+                    }
+                    return null;
+                }
+                """)
+                gb.configure_column("To", cellStyle=to_cell_style)
+                
+                # Hide the _ins_end marker column
+                gb.configure_column("_ins_end", hide=True)
+                
                 gridOptions = gb.build()
                 # Height based on row count, capped at max
                 _display_rows = min(total_rows, 50) if total_rows > 0 else 20
