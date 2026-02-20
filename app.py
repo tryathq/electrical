@@ -1666,8 +1666,8 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 )
                 gb.configure_selection('single')
                 gridOptions = gb.build()
-                # Height: allow more rows when default is "all" (cap at 100 rows height for viewport)
-                _display_rows = min(total_rows, 100) if total_rows > 0 else 20
+                # Height based on row count, capped at max
+                _display_rows = min(total_rows, 50) if total_rows > 0 else 20
                 AgGrid(
                     df_filtered,
                     gridOptions=gridOptions,
