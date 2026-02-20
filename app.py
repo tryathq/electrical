@@ -1519,80 +1519,65 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             
             with col_download:
                 st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
-                _download_shown = False
+                # Find the file to download based on various sources
+                _dl_file_data = None
+                _dl_filename = None
+                
+                # Priority 1: viewing saved report from Reports page
                 viewing_saved = st.session_state.get("reports_view_active")
-                if viewing_saved:
+                if viewing_saved and not _dl_file_data:
                     report_path = REPORTS_DIR / viewing_saved
                     if report_path.exists():
                         try:
                             with open(report_path, "rb") as f:
-                                file_data = f.read()
-                            st.download_button(
-                                label="📥 Download",
-                                data=file_data,
-                                file_name=viewing_saved,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                                key="download_button_output"
-                            )
-                            _download_shown = True
+                                _dl_file_data = f.read()
+                            _dl_filename = viewing_saved
                         except Exception:
                             pass
-                if not _download_shown and 'last_output_file_data' in st.session_state:
-                    file_data = st.session_state['last_output_file_data']
-                    download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
-                    st.download_button(
-                        label="📥 Download",
-                        data=file_data,
-                        file_name=download_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="download_button_output"
-                    )
-                    _download_shown = True
-                if not _download_shown and 'last_output_path' in st.session_state:
+                
+                # Priority 2: Extract filename from output_data_key (home page latest/generated)
+                if not _dl_file_data and output_data_key:
+                    _extracted_filename = None
+                    for prefix in ("output_data_latest_", "output_data_home_", "output_data_report_"):
+                        if output_data_key.startswith(prefix):
+                            _extracted_filename = output_data_key[len(prefix):]
+                            break
+                    if _extracted_filename:
+                        _dl_path = REPORTS_DIR / _extracted_filename
+                        if _dl_path.exists():
+                            try:
+                                with open(_dl_path, "rb") as f:
+                                    _dl_file_data = f.read()
+                                _dl_filename = _extracted_filename
+                            except Exception:
+                                pass
+                
+                # Priority 3: last_output_file_data from session (just generated)
+                if not _dl_file_data and 'last_output_file_data' in st.session_state:
+                    _dl_file_data = st.session_state['last_output_file_data']
+                    _dl_filename = st.session_state.get('last_output_filename', 'output.xlsx')
+                
+                # Priority 4: last_output_path from session
+                if not _dl_file_data and 'last_output_path' in st.session_state:
                     output_path = Path(st.session_state['last_output_path'])
                     if output_path.exists():
                         try:
                             with open(output_path, "rb") as f:
-                                file_data = f.read()
-                            download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
-                            st.download_button(
-                                label="📥 Download",
-                                data=file_data,
-                                file_name=download_filename,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                                key="download_button_output"
-                            )
-                            _download_shown = True
+                                _dl_file_data = f.read()
+                            _dl_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                         except Exception:
                             pass
-                # Handle home page latest report - extract filename from output_data_key
-                if not _download_shown and output_data_key:
-                    # Check for patterns: output_data_latest_*, output_data_home_*
-                    _dl_filename = None
-                    if output_data_key.startswith("output_data_latest_"):
-                        _dl_filename = output_data_key.replace("output_data_latest_", "")
-                    elif output_data_key.startswith("output_data_home_"):
-                        _dl_filename = output_data_key.replace("output_data_home_", "")
-                    if _dl_filename:
-                        _dl_path = REPORTS_DIR / _dl_filename
-                        if _dl_path.exists():
-                            try:
-                                with open(_dl_path, "rb") as f:
-                                    file_data = f.read()
-                                st.download_button(
-                                    label="📥 Download",
-                                    data=file_data,
-                                    file_name=_dl_filename,
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    use_container_width=True,
-                                    key="download_button_output"
-                                )
-                                _download_shown = True
-                            except Exception:
-                                pass
+                
+                # Show download button if we have data
+                if _dl_file_data and _dl_filename:
+                    st.download_button(
+                        label="📥 Download",
+                        data=_dl_file_data,
+                        file_name=_dl_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="download_button_output"
+                    )
             
             # Apply day filter
             if available_dates and selected_day and selected_day != "All Days":
