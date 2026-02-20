@@ -897,6 +897,16 @@ with st.sidebar:
         header_rows = 10
         data_only = False
         verbose = False
+        
+        # Generate button at bottom of sidebar
+        st.divider()
+        _bg_status_sidebar = _cached_bg_job.get("status") if _cached_bg_job else None
+        if _bg_status_sidebar != "running":
+            if st.button("🚀 Generate Report", type="primary", use_container_width=True, key="sidebar_generate_btn"):
+                st.session_state["_sidebar_generate_clicked"] = True
+                st.rerun()
+        else:
+            st.button("⏳ Generating...", type="secondary", use_container_width=True, disabled=True, key="sidebar_generate_disabled")
     else:
         # Reports: show list of saved reports in sidebar; selecting one shows it on the right
         instructions_file = None
@@ -1025,12 +1035,35 @@ if _status in ("running", "done", "error"):
     elif _status == "done":
         # Only show "Report ready" banner on Home page, not when viewing Reports page
         if not _viewing_saved_report and not _on_reports_list:
-            st.success(f"✅ **Report ready.** It has been saved to **Reports**. Go to **Reports** in the sidebar to view and download.")
-            if st.button("View in Reports", key="bg_job_view"):
-                st.session_state["view_mode"] = "reports"
-                url_reports_list()
-                background_write_job({})  # clear job so banner doesn't show again
-                st.rerun()
+            st.success(f"✅ **Report ready.** Displaying below. Also saved to **Reports**.")
+            # Automatically load and display the completed report on home page
+            _done_filename = _bg_job.get("output_filename")
+            if _done_filename:
+                _done_report_path = REPORTS_DIR / _done_filename
+                if _done_report_path.exists():
+                    try:
+                        _done_df = pd.read_excel(_done_report_path, engine="openpyxl")
+                        _done_report_key = f"output_data_home_{_done_filename}"
+                        st.session_state[_done_report_key] = _done_df
+                        st.session_state["display_output_data_key"] = _done_report_key
+                        st.session_state["display_station_name"] = _bg_job.get("station_name", "")
+                        # Calculate stats
+                        _done_total_days = 0
+                        _done_total_instructions = _bg_job.get("total_instructions", 0)
+                        if "Date" in _done_df.columns:
+                            _done_unique_dates = _done_df["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique()
+                            _done_total_days = len([d for d in _done_unique_dates if d and d.strip()])
+                        if not _done_total_instructions and "Sum Mus" in _done_df.columns:
+                            _done_total_instructions = len(_done_df[_done_df["Sum Mus"].notna() & (_done_df["Sum Mus"] != "")])
+                        st.session_state["display_stats"] = {
+                            "total_days": _done_total_days,
+                            "total_instructions": _done_total_instructions,
+                            "output_rows": len(_done_df),
+                        }
+                        # Clear background job after loading
+                        background_write_job({})
+                    except Exception:
+                        pass
     elif _status == "error":
         _err = _bg_job.get("error_message", "Unknown error")
         st.error(f"❌ **Report generation failed:** {_err}")
@@ -1153,33 +1186,41 @@ if _status == "running" and _bg_job and (not _viewing_saved_report or _viewing_g
             if st.button("🔄 Refresh status", key="bg_job_refresh_table"):
                 st.rerun()
 # Show upload/form prompts only when not viewing a report and not in the middle of background generation
+# But don't stop if we have a latest report to show
+_has_reports_to_show = bool(reports_load_index())
 if not _viewing_saved_report and _status != "running":
     if instructions_file is None:
-        st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
-        st.stop()
+        if not _has_reports_to_show:
+            st.info("👈 Please upload an Instructions Excel file in the sidebar to get started.")
+            st.stop()
 
     if not station_name or station_name.strip() == "":
-        if 'station_names_cache' in st.session_state and len(st.session_state.station_names_cache) > 0:
-            st.warning("⚠️ Please select a Station Name from the dropdown")
-        else:
-            st.warning("⚠️ Please enter or select a Station Name")
-        st.stop()
+        if not _has_reports_to_show:
+            if 'station_names_cache' in st.session_state and len(st.session_state.station_names_cache) > 0:
+                st.warning("⚠️ Please select a Station Name from the dropdown")
+            else:
+                st.warning("⚠️ Please enter or select a Station Name")
+            st.stop()
 
     if dc_file is None:
-        st.info("👈 Please upload a DC Excel file in the sidebar to get started.")
-        st.stop()
+        if not _has_reports_to_show:
+            st.info("👈 Please upload a DC Excel file in the sidebar to get started.")
+            st.stop()
 
     if not bd_folder_path or bd_folder_path.strip() == "":
-        st.info("👈 Please enter the path to the BD folder in the sidebar.")
-        st.stop()
+        if not _has_reports_to_show:
+            st.info("👈 Please enter the path to the BD folder in the sidebar.")
+            st.stop()
 
     if not scada_column or scada_column.strip() == "":
-        st.error("❌ SCADA Column Name is required. Please enter the SCADA column name.")
-        st.stop()
+        if not _has_reports_to_show:
+            st.error("❌ SCADA Column Name is required. Please enter the SCADA column name.")
+            st.stop()
 
     if not bd_sheet or bd_sheet.strip() == "":
-        st.error("❌ BD Sheet Name is required. Please enter the BD sheet name.")
-        st.stop()
+        if not _has_reports_to_show:
+            st.error("❌ BD Sheet Name is required. Please enter the BD sheet name.")
+            st.stop()
 
 # When viewing a past report from Menu Reports: load it into session and set display keys (once)
 if _reports_view_filename and _reports_view_entry and st.session_state.get("reports_view_active") != _reports_view_filename:
@@ -1232,6 +1273,61 @@ _showing_bg_job_table = (
     and (Path(_bg_job.get("temp_path", "")) / "partial_output.json").exists()
     and (not _viewing_saved_report or _reports_view_filename == "__generating__")
 )
+
+# Check if we're on home page
+_is_home_page = (
+    st.session_state.get("view_mode", "") != "reports"
+    and not st.session_state.get("reports_view_filename")
+    and not st.session_state.get("reports_view_active")
+)
+
+# If on home page, always try to show the latest report (either from current session or saved reports)
+if _is_home_page and not _showing_bg_job_table and _status not in ("running", "done"):
+    # Check if we already have valid data to display
+    _current_key = st.session_state.get("display_output_data_key")
+    _has_valid_data = _current_key and _current_key in st.session_state and st.session_state[_current_key] is not None
+    
+    # If no valid data, load the latest report from saved reports
+    if not _has_valid_data:
+        _latest_reports = reports_load_index()
+        if _latest_reports:
+            # Get the most recent report (first in list, sorted by run_at desc)
+            _latest_entry = _latest_reports[0]
+            _latest_filename = _latest_entry.get("filename", "")
+            if _latest_filename and _latest_filename != "__generating__":
+                _latest_path = REPORTS_DIR / _latest_filename
+                if _latest_path.exists():
+                    try:
+                        _latest_df = pd.read_excel(_latest_path, engine="openpyxl")
+                        _latest_key = f"output_data_latest_{_latest_filename}"
+                        st.session_state[_latest_key] = _latest_df
+                        st.session_state["display_output_data_key"] = _latest_key
+                        st.session_state["display_station_name"] = _latest_entry.get("station", "")
+                        # Calculate stats
+                        _latest_total_days = 0
+                        _latest_total_instructions = _latest_entry.get("total_instructions", 0)
+                        if "Date" in _latest_df.columns:
+                            _latest_unique_dates = _latest_df["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique()
+                            _latest_total_days = len([d for d in _latest_unique_dates if d and d.strip()])
+                        if not _latest_total_instructions and "Sum Mus" in _latest_df.columns:
+                            _latest_total_instructions = len(_latest_df[_latest_df["Sum Mus"].notna() & (_latest_df["Sum Mus"] != "")])
+                        st.session_state["display_stats"] = {
+                            "total_days": _latest_total_days,
+                            "total_instructions": _latest_total_instructions,
+                            "output_rows": _latest_entry.get("row_count", 0) or len(_latest_df),
+                        }
+                        # Set report title
+                        date_f = _latest_entry.get("date_from", "")
+                        date_t = _latest_entry.get("date_to", "")
+                        if date_f and date_t:
+                            st.session_state["report_title"] = f"Back Down Report — {date_f} to {date_t}"
+                        elif date_f:
+                            st.session_state["report_title"] = f"Back Down Report — {date_f}"
+                        else:
+                            st.session_state["report_title"] = "Back Down Report"
+                    except Exception:
+                        pass
+
 if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
     output_data_key = st.session_state['display_output_data_key']
     station_name_display = st.session_state.get('display_station_name', '')
@@ -1394,6 +1490,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
             
             with col_download:
                 st.markdown('<div style="min-height: 1.5rem;">&nbsp;</div>', unsafe_allow_html=True)
+                _download_shown = False
                 viewing_saved = st.session_state.get("reports_view_active")
                 if viewing_saved:
                     report_path = REPORTS_DIR / viewing_saved
@@ -1409,9 +1506,10 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                                 use_container_width=True,
                                 key="download_button_output"
                             )
+                            _download_shown = True
                         except Exception:
                             pass
-                elif 'last_output_file_data' in st.session_state:
+                if not _download_shown and 'last_output_file_data' in st.session_state:
                     file_data = st.session_state['last_output_file_data']
                     download_filename = st.session_state.get('last_output_filename', 'output.xlsx')
                     st.download_button(
@@ -1422,7 +1520,8 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                         use_container_width=True,
                         key="download_button_output"
                     )
-                elif 'last_output_path' in st.session_state:
+                    _download_shown = True
+                if not _download_shown and 'last_output_path' in st.session_state:
                     output_path = Path(st.session_state['last_output_path'])
                     if output_path.exists():
                         try:
@@ -1437,8 +1536,34 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                                 use_container_width=True,
                                 key="download_button_output"
                             )
+                            _download_shown = True
                         except Exception:
                             pass
+                # Handle home page latest report - extract filename from output_data_key
+                if not _download_shown and output_data_key:
+                    # Check for patterns: output_data_latest_*, output_data_home_*
+                    _dl_filename = None
+                    if output_data_key.startswith("output_data_latest_"):
+                        _dl_filename = output_data_key.replace("output_data_latest_", "")
+                    elif output_data_key.startswith("output_data_home_"):
+                        _dl_filename = output_data_key.replace("output_data_home_", "")
+                    if _dl_filename:
+                        _dl_path = REPORTS_DIR / _dl_filename
+                        if _dl_path.exists():
+                            try:
+                                with open(_dl_path, "rb") as f:
+                                    file_data = f.read()
+                                st.download_button(
+                                    label="📥 Download",
+                                    data=file_data,
+                                    file_name=_dl_filename,
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True,
+                                    key="download_button_output"
+                                )
+                                _download_shown = True
+                            except Exception:
+                                pass
             
             # Apply day filter
             if available_dates and selected_day and selected_day != "All Days":
@@ -1547,11 +1672,12 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 else:
                     st.caption(f"Showing all {total_rows} rows")
 
-# Generate button only on Home, and hidden while a report is generating in the background
+# Generate button - triggered from sidebar
 _viewing_report = bool(st.session_state.get("reports_view_active"))
 run_generate = False
 if not _viewing_report and _status != "running":
-    run_generate = st.button("🚀 Generate", type="primary", width='stretch') or st.session_state.pop('_run_continue_processing', False)
+    # Check if sidebar generate button was clicked
+    run_generate = st.session_state.pop('_sidebar_generate_clicked', False) or st.session_state.pop('_run_continue_processing', False)
 if run_generate:
     # Start report generation in a background thread so it continues when user navigates away
     try:
