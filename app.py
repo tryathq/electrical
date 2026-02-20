@@ -559,6 +559,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
             "date_to": date_to,
             "run_at": datetime.now().isoformat(),
             "row_count": len(output_rows),
+            "total_instructions": len(matches),
         })
 
         update_progress(
@@ -567,6 +568,7 @@ def _run_report_generation_worker(job_data: dict) -> None:
             progress_pct=100,
             processed_slots=processed_slots,
             total_slots=total_slots,
+            total_instructions=len(matches),
             error_message=None,
         )
     except Exception as e:
@@ -1197,10 +1199,19 @@ if _reports_view_filename and _reports_view_entry and st.session_state.get("repo
                 st.session_state["display_station_name"] = _reports_view_entry.get("station", "")
                 date_f = _reports_view_entry.get("date_from", "")
                 date_t = _reports_view_entry.get("date_to", "")
+                # Calculate total_days from unique dates in the data
+                _total_days = 0
+                _total_instructions = _reports_view_entry.get("total_instructions", 0)
+                if "Date" in df_report.columns:
+                    _unique_dates = df_report["Date"].dropna().astype(str).replace("", pd.NA).dropna().unique()
+                    _total_days = len([d for d in _unique_dates if d and d.strip()])
+                # If total_instructions not stored, count from Sum Mus rows
+                if not _total_instructions and "Sum Mus" in df_report.columns:
+                    _total_instructions = len(df_report[df_report["Sum Mus"].notna() & (df_report["Sum Mus"] != "")])
                 st.session_state["display_stats"] = {
-                    "total_days": 0,
-                    "total_slots": 0,
-                    "output_rows": _reports_view_entry.get("row_count", 0),
+                    "total_days": _total_days,
+                    "total_instructions": _total_instructions,
+                    "output_rows": _reports_view_entry.get("row_count", 0) or len(df_report),
                 }
                 if date_f and date_t:
                     st.session_state["report_title"] = f"Back Down Report — {date_f} to {date_t}"
@@ -1268,7 +1279,7 @@ if 'display_output_data_key' in st.session_state and not _showing_bg_job_table:
                 with col1:
                     st.metric("Total Days", stats.get('total_days', 0))
                 with col2:
-                    st.metric("Total Slots", stats.get('total_slots', 0))
+                    st.metric("Total Instructions", stats.get('total_instructions', 0))
                 with col3:
                     st.metric("Output Rows", stats.get('output_rows', 0))
                 if st.session_state.get("reports_view_active"):
