@@ -113,7 +113,30 @@ def slots_15min(from_time, to_time):
     result = []
     m = start_slot
     # Only include slots where the slot's START time is < end_min
-    # This ensures slots don't extend beyond the end time
+    # This ensures slots do not extend beyond the given end time.
+    while m < end_min:
+        from_m = m % (24 * 60)
+        to_m = (m + 15) % (24 * 60)
+        result.append((minutes_to_time_str(from_m), minutes_to_time_str(to_m)))
+        m += 15
+    return result
+
+
+def slots_15min_from_exact(from_time, to_time):
+    """
+    Generate 15-minute slots between from_time and to_time, starting exactly at from_time (no floor).
+    Use for gap fill so the first slot is the immediate next after the previous instruction end.
+    Returns list of (from_str, to_str) e.g. for 13:50–20:15: [("13:50", "14:05"), ("14:05", "14:20"), ...].
+    Handles overnight.
+    """
+    start_min = time_to_minutes(from_time)
+    end_min = time_to_minutes(to_time)
+    if start_min is None or end_min is None:
+        return []
+    if start_min >= end_min:
+        end_min += 24 * 60
+    result = []
+    m = start_min
     while m < end_min:
         from_m = m % (24 * 60)
         to_m = (m + 15) % (24 * 60)

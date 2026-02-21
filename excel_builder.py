@@ -5,10 +5,11 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.comments import Comment
 
 # Visible columns + hidden marker column
-HEADERS = ["Date", "From", "To", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
-COLUMN_WIDTHS = [15, 10, 10, 12, 25, 12, 12, 12, 14, 12, 12, 12, 8]
+HEADERS = ["Date", "From", "To", "Ramp rate", "DC (MW)", "As per SLDC Scada in MW", "DC , Scada Diff (MW)", "Mus", "Sum Mus", "MW as per ramp", "Diff", "MU", "Sum MU", "_ins_end"]
+COLUMN_WIDTHS = [15, 10, 10, 12, 12, 25, 12, 12, 12, 14, 12, 12, 12, 8]
 PAD = 0
 
 # Yellow highlight fill
@@ -90,18 +91,26 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
         to_cell = sheet.cell(row=out_row, column=start_col + 2)
         to_cell.value = to_val
         
-        sheet.cell(row=out_row, column=start_col + 3).value = row_dict.get("DC (MW)")
-        sheet.cell(row=out_row, column=start_col + 4).value = row_dict.get("As per SLDC Scada in MW")
-        sheet.cell(row=out_row, column=start_col + 5).value = row_dict.get("DC , Scada Diff (MW)")
-        sheet.cell(row=out_row, column=start_col + 6).value = row_dict.get("Mus")
-        sheet.cell(row=out_row, column=start_col + 7).value = row_dict.get("Sum Mus")
-        sheet.cell(row=out_row, column=start_col + 8).value = row_dict.get("MW as per ramp")
-        sheet.cell(row=out_row, column=start_col + 9).value = row_dict.get("Diff")
-        sheet.cell(row=out_row, column=start_col + 10).value = row_dict.get("MU")
-        sheet.cell(row=out_row, column=start_col + 11).value = row_dict.get("Sum MU")
+        ramp_rate_cell = sheet.cell(row=out_row, column=start_col + 3)
+        ramp_rate_cell.value = row_dict.get("Ramp rate", "")
+        ramp_rate_note = row_dict.get("Ramp rate_note", "")
+        if not ramp_rate_note and isinstance(row_dict.get("tooltips"), dict):
+            ramp_rate_note = row_dict["tooltips"].get("Ramp rate", "")
+        if isinstance(ramp_rate_note, str) and ramp_rate_note.strip():
+            ramp_rate_cell.comment = Comment(ramp_rate_note.strip(), "App")
+        
+        sheet.cell(row=out_row, column=start_col + 4).value = row_dict.get("DC (MW)")
+        sheet.cell(row=out_row, column=start_col + 5).value = row_dict.get("As per SLDC Scada in MW")
+        sheet.cell(row=out_row, column=start_col + 6).value = row_dict.get("DC , Scada Diff (MW)")
+        sheet.cell(row=out_row, column=start_col + 7).value = row_dict.get("Mus")
+        sheet.cell(row=out_row, column=start_col + 8).value = row_dict.get("Sum Mus")
+        sheet.cell(row=out_row, column=start_col + 9).value = row_dict.get("MW as per ramp")
+        sheet.cell(row=out_row, column=start_col + 10).value = row_dict.get("Diff")
+        sheet.cell(row=out_row, column=start_col + 11).value = row_dict.get("MU")
+        sheet.cell(row=out_row, column=start_col + 12).value = row_dict.get("Sum MU")
         
         # Write _ins_end marker (hidden column)
-        ins_end_cell = sheet.cell(row=out_row, column=start_col + 12)
+        ins_end_cell = sheet.cell(row=out_row, column=start_col + 13)
         ins_end_cell.value = "TRUE" if ins_end else "FALSE"
         
         # Apply yellow highlighting
@@ -116,7 +125,7 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
             to_cell.font = Font(bold=True)
         
         # Apply borders to all columns including _ins_end
-        for c in range(13):
+        for c in range(14):
             sheet.cell(row=out_row, column=start_col + c).border = thin_border
 
     if date_start_row is not None:
@@ -130,7 +139,7 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
             )
 
     last_row = row_idx + len(output_rows) - 1
-    last_content_col = start_col + 12  # Including _ins_end column
+    last_content_col = start_col + 13  # Including _ins_end column
 
     sheet.freeze_panes = sheet.cell(row=start_data_row, column=start_col).coordinate
     sheet.sheet_view.showGridLines = False
@@ -139,9 +148,9 @@ def build_report_workbook(output_rows: list[dict]) -> Workbook:
         sheet.column_dimensions[get_column_letter(start_col + i)].width = w
     
     # Hide the _ins_end marker column
-    sheet.column_dimensions[get_column_letter(start_col + 12)].hidden = True
+    sheet.column_dimensions[get_column_letter(start_col + 13)].hidden = True
 
     # Print area excludes the hidden _ins_end column
-    sheet.print_area = f"A1:{get_column_letter(start_col + 11)}{last_row}"
+    sheet.print_area = f"A1:{get_column_letter(start_col + 12)}{last_row}"
 
     return wb
