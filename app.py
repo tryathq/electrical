@@ -1326,7 +1326,11 @@ _viewing_generating_report = _viewing_saved_report and _reports_view_filename ==
 def _render_generating_report_table():
     """Refresh only this block periodically so the rest of the page (sidebar, position) stays stable."""
     job = background_read_job()
-    if not job or job.get("status") != "running":
+    if not job:
+        return
+    if job.get("status") != "running":
+        # Job finished (done/error) — trigger full rerun so home page shows completed table
+        st.rerun()
         return
     temp_path = Path(job.get("temp_path", ""))
     partial_file = temp_path / "partial_output.json" if temp_path else None
